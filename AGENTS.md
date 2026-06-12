@@ -162,6 +162,10 @@ temporary artifacts or secrets are included.
 
 - Use branch names such as `codex/<topic>`, `feature/<topic>`, `fix/<topic>`, or `docs/<topic>`.
 - Each commit should express one logical, testable change.
+- When asked to commit a set of changes, separate them into multiple commits by functional scope
+  instead of combining unrelated features, fixes, tests, or documentation into one commit.
+- After completing user-requested commits, push them to the configured remote unless the user
+  explicitly asks to keep them local or no remote is available.
 - Use Conventional Commits:
 
 ```text
