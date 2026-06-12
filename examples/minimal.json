@@ -1,0 +1,25 @@
+{
+  "run_name": "local-demo",
+  "random_seed": 42,
+  "llm": {
+    "provider": "mock",
+    "model": "mock-agent"
+  },
+  "generation": {
+    "num_tasks": 3,
+    "rollouts_per_task": 2,
+    "max_turns": 4,
+    "min_reward": 0.6,
+    "seed_topics": [
+      "calculation",
+      "tool use"
+    ],
+    "evolve_rounds": 1
+  },
+  "output": {
+    "directory": "runs/local-demo",
+    "export_sft": true,
+    "export_preferences": true
+  }
+}
+

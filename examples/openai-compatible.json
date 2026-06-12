@@ -1,0 +1,31 @@
+{
+  "run_name": "api-demo",
+  "random_seed": 42,
+  "llm": {
+    "provider": "openai_compatible",
+    "model": "YOUR_MODEL_NAME",
+    "base_url": "https://api.openai.com/v1",
+    "api_key_env": "OPENAI_API_KEY",
+    "chat_completions_path": "/chat/completions",
+    "timeout_seconds": 60,
+    "temperature": 0.7,
+    "max_tokens": 2048
+  },
+  "generation": {
+    "num_tasks": 20,
+    "rollouts_per_task": 4,
+    "max_turns": 8,
+    "min_reward": 0.7,
+    "seed_topics": [
+      "calculation",
+      "information lookup",
+      "planning"
+    ],
+    "evolve_rounds": 1
+  },
+  "output": {
+    "directory": "runs/api-demo",
+    "export_sft": true,
+    "export_preferences": true
+  }
+}

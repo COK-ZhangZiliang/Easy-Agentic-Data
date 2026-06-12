@@ -1,0 +1,31 @@
+{
+  "run_name": "local-llm-demo",
+  "random_seed": 42,
+  "llm": {
+    "provider": "local_openai_compatible",
+    "model": "Qwen/Qwen3-8B",
+    "base_url": "http://127.0.0.1:8000/v1",
+    "api_key_env": null,
+    "chat_completions_path": "/chat/completions",
+    "timeout_seconds": 120,
+    "temperature": 0.7,
+    "max_tokens": 2048
+  },
+  "generation": {
+    "num_tasks": 20,
+    "rollouts_per_task": 4,
+    "max_turns": 8,
+    "min_reward": 0.7,
+    "seed_topics": [
+      "calculation",
+      "information lookup",
+      "planning"
+    ],
+    "evolve_rounds": 1
+  },
+  "output": {
+    "directory": "runs/local-llm-demo",
+    "export_sft": true,
+    "export_preferences": true
+  }
+}
