@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 from easy_agentic_data.models import ToolEvent
-
 
 ToolHandler = Callable[..., Any]
 
@@ -14,10 +14,10 @@ ToolHandler = Callable[..., Any]
 class Tool:
     name: str
     description: str
-    parameters: Dict[str, Any]
+    parameters: dict[str, Any]
     handler: ToolHandler
 
-    def api_schema(self) -> Dict[str, Any]:
+    def api_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -29,8 +29,8 @@ class Tool:
 
 
 class ToolRegistry:
-    def __init__(self, tools: List[Tool] | None = None) -> None:
-        self._tools: Dict[str, Tool] = {}
+    def __init__(self, tools: list[Tool] | None = None) -> None:
+        self._tools: dict[str, Tool] = {}
         for tool in tools or []:
             self.register(tool)
 
@@ -39,10 +39,10 @@ class ToolRegistry:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
-    def schemas(self) -> List[Dict[str, Any]]:
+    def schemas(self) -> list[dict[str, Any]]:
         return [tool.api_schema() for tool in self._tools.values()]
 
-    def execute(self, call_id: str, name: str, arguments: Dict[str, Any]) -> ToolEvent:
+    def execute(self, call_id: str, name: str, arguments: dict[str, Any]) -> ToolEvent:
         started = time.perf_counter()
         tool = self._tools.get(name)
         if tool is None:
@@ -68,8 +68,8 @@ class ToolRegistry:
         )
 
 
-def calculator(operation: str, a: float, b: float) -> Dict[str, float | str]:
-    operations: Dict[str, Callable[[float, float], float]] = {
+def calculator(operation: str, a: float, b: float) -> dict[str, float | str]:
+    operations: dict[str, Callable[[float, float], float]] = {
         "add": lambda left, right: left + right,
         "subtract": lambda left, right: left - right,
         "multiply": lambda left, right: left * right,
@@ -104,4 +104,3 @@ def default_tool_registry() -> ToolRegistry:
             )
         ]
     )
-

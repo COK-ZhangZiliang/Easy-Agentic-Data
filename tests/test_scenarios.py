@@ -87,4 +87,3 @@ def _scenario() -> Scenario:
 
 if __name__ == "__main__":
     unittest.main()
-

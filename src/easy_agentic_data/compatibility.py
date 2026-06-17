@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict
-
 from easy_agentic_data.llm.base import LLMClient
 from easy_agentic_data.models import Message
 
 
-def probe_tool_calling(client: LLMClient) -> Dict[str, object]:
+def probe_tool_calling(client: LLMClient) -> dict[str, object]:
     tools = [
         {
             "type": "function",

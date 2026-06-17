@@ -14,16 +14,16 @@ class GovernanceCompatibilityTests(unittest.TestCase):
         findings = sensitive_findings(
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz and password=long-secret"
         )
-        self.assertEqual({item["kind"] for item in findings}, {"bearer_token", "password_assignment"})
+        self.assertEqual(
+            {item["kind"] for item in findings}, {"bearer_token", "password_assignment"}
+        )
         with tempfile.TemporaryDirectory() as directory:
             old = Path(directory) / "old.txt"
             fresh = Path(directory) / "fresh.txt"
             old.write_text("old", encoding="utf-8")
             fresh.write_text("fresh", encoding="utf-8")
             os.utime(old, (1, 1))
-            removed = purge_expired_artifacts(
-                directory, retention_seconds=60, now=time.time()
-            )
+            removed = purge_expired_artifacts(directory, retention_seconds=60, now=time.time())
             self.assertIn("old.txt", removed)
             self.assertTrue(fresh.exists())
 

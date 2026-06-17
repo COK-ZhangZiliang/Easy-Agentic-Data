@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
 from easy_agentic_data.models import PreferencePair, Trajectory
 
@@ -14,7 +15,7 @@ def write_json(path: Path, value: Any) -> None:
         handle.write("\n")
 
 
-def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
+def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -22,7 +23,7 @@ def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
             handle.write("\n")
 
 
-def trajectory_to_sft(trajectory: Trajectory) -> Dict[str, Any]:
+def trajectory_to_sft(trajectory: Trajectory) -> dict[str, Any]:
     return {
         "id": trajectory.trajectory_id,
         "messages": [message.to_api_dict() for message in trajectory.messages],
@@ -44,7 +45,7 @@ def trajectory_to_sft(trajectory: Trajectory) -> Dict[str, Any]:
     }
 
 
-def preference_to_training(pair: PreferencePair) -> Dict[str, Any]:
+def preference_to_training(pair: PreferencePair) -> dict[str, Any]:
     prompt = [
         message.to_api_dict()
         for message in pair.chosen.messages
@@ -70,4 +71,3 @@ def preference_to_training(pair: PreferencePair) -> Dict[str, Any]:
             "margin": pair.margin,
         },
     }
-

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
 from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.models import stable_id
@@ -13,17 +13,17 @@ class HiddenEvaluatorContext:
     """Private evaluator state that must never enter agent or user observations."""
 
     reference_answer: str = ""
-    reference_artifacts: List[str] = field(default_factory=list)
-    hidden_tests: List[str] = field(default_factory=list)
-    required_state: Dict[str, Any] = field(default_factory=dict)
-    forbidden_state: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    reference_artifacts: list[str] = field(default_factory=list)
+    hidden_tests: list[str] = field(default_factory=list)
+    required_state: dict[str, Any] = field(default_factory=dict)
+    forbidden_state: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "HiddenEvaluatorContext":
+    def from_dict(cls, value: dict[str, Any]) -> HiddenEvaluatorContext:
         return cls(**value)
 
 
@@ -34,7 +34,7 @@ class Scenario:
     query_seed: QuerySeed
     environment: EnvironmentSpec
     hidden_evaluator: HiddenEvaluatorContext = field(default_factory=HiddenEvaluatorContext)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     scenario_id: str = ""
 
     def __post_init__(self) -> None:
@@ -43,7 +43,7 @@ class Scenario:
             content.pop("scenario_id", None)
             self.scenario_id = stable_id("scenario", content)
 
-    def to_dict(self, *, include_hidden: bool = True) -> Dict[str, Any]:
+    def to_dict(self, *, include_hidden: bool = True) -> dict[str, Any]:
         value = {
             "scenario_id": self.scenario_id,
             "query_seed": self.query_seed.to_dict(include_hidden=include_hidden),
@@ -55,7 +55,7 @@ class Scenario:
         return value
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "Scenario":
+    def from_dict(cls, value: dict[str, Any]) -> Scenario:
         data = dict(value)
         data["query_seed"] = QuerySeed.from_dict(data["query_seed"])
         data["environment"] = EnvironmentSpec.from_dict(data["environment"])
@@ -75,7 +75,7 @@ class ScenarioInstance:
     hidden_user: HiddenUserContext
     hidden_evaluator: HiddenEvaluatorContext
     random_seed: int
-    parameters: Dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
     initial_state_hash: str = ""
     instance_id: str = ""
 
@@ -101,9 +101,9 @@ class ScenarioInstance:
         scenario: Scenario,
         *,
         random_seed: int,
-        parameters: Dict[str, Any] | None = None,
+        parameters: dict[str, Any] | None = None,
         initial_state_hash: str = "",
-    ) -> "ScenarioInstance":
+    ) -> ScenarioInstance:
         return cls(
             scenario_id=scenario.scenario_id,
             environment_id=scenario.environment.environment_id,
@@ -115,7 +115,7 @@ class ScenarioInstance:
             initial_state_hash=initial_state_hash,
         )
 
-    def public_view(self) -> Dict[str, Any]:
+    def public_view(self) -> dict[str, Any]:
         return {
             "instance_id": self.instance_id,
             "scenario_id": self.scenario_id,
@@ -126,9 +126,9 @@ class ScenarioInstance:
             "initial_state_hash": self.initial_state_hash,
         }
 
-    def sensitive_strings(self) -> List[str]:
-        hidden_values: List[str] = []
-        public_values: List[str] = []
+    def sensitive_strings(self) -> list[str]:
+        hidden_values: list[str] = []
+        public_values: list[str] = []
         _collect_strings(self.hidden_user.goal, hidden_values)
         _collect_strings(self.hidden_user.unavailable_facts, hidden_values)
         _collect_strings(self.hidden_evaluator.reference_answer, hidden_values)
@@ -136,15 +136,9 @@ class ScenarioInstance:
         _collect_strings(self.hidden_evaluator.hidden_tests, hidden_values)
         _collect_strings(self.public_task.to_dict(), public_values)
         public = set(public_values)
-        return sorted(
-            {
-                value
-                for value in hidden_values
-                if len(value) >= 8 and value not in public
-            }
-        )
+        return sorted({value for value in hidden_values if len(value) >= 8 and value not in public})
 
-    def to_dict(self, *, include_hidden: bool = True) -> Dict[str, Any]:
+    def to_dict(self, *, include_hidden: bool = True) -> dict[str, Any]:
         value = self.public_view()
         if include_hidden:
             value["hidden_user"] = self.hidden_user.to_dict()
@@ -152,7 +146,7 @@ class ScenarioInstance:
         return value
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "ScenarioInstance":
+    def from_dict(cls, value: dict[str, Any]) -> ScenarioInstance:
         data = dict(value)
         data["public_task"] = PublicTaskContext.from_dict(data["public_task"])
         data["hidden_user"] = HiddenUserContext.from_dict(data.get("hidden_user", {}))
@@ -162,7 +156,7 @@ class ScenarioInstance:
         return cls(**data)
 
 
-def _collect_strings(value: Any, output: List[str]) -> None:
+def _collect_strings(value: Any, output: list[str]) -> None:
     if isinstance(value, str):
         if value:
             output.append(value)

@@ -60,7 +60,9 @@ class HeadlessAgentTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "agent.jsonl"
-            with TraceRecorder(path, session_id="session_agent", scenario_instance=instance) as recorder:
+            with TraceRecorder(
+                path, session_id="session_agent", scenario_instance=instance
+            ) as recorder:
                 result = agent.run(instance, recorder)
             replay = replay_trace(load_trace(path))
 

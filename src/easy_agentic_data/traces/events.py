@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict
+from typing import Any
 
 from easy_agentic_data.models import stable_id, utc_now
-
 
 TRACE_SCHEMA_VERSION = 1
 
@@ -62,7 +61,7 @@ class TraceEvent:
     session_id: str
     sequence: int
     event_type: EventType
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
     timestamp: str = field(default_factory=utc_now)
     schema_version: int = TRACE_SCHEMA_VERSION
     event_id: str = ""
@@ -99,13 +98,13 @@ class TraceEvent:
                 },
             )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["event_type"] = self.event_type.value
         return value
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "TraceEvent":
+    def from_dict(cls, value: dict[str, Any]) -> TraceEvent:
         data = dict(value)
         version = data.get("schema_version")
         if version != TRACE_SCHEMA_VERSION:

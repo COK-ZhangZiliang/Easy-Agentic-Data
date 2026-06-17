@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from easy_agentic_data.traces.events import EventType
 from easy_agentic_data.traces.recorder import Trace, load_trace
@@ -12,13 +12,13 @@ from easy_agentic_data.traces.recorder import Trace, load_trace
 class ReplayState:
     session_id: str = ""
     scenario_instance_id: str = ""
-    messages: List[Dict[str, Any]] = field(default_factory=list)
-    tool_calls: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    policy_decisions: List[Dict[str, Any]] = field(default_factory=list)
-    verifications: List[Dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
+    policy_decisions: list[dict[str, Any]] = field(default_factory=list)
+    verifications: list[dict[str, Any]] = field(default_factory=list)
     workspace_state_hash: str = ""
-    termination_reason: Optional[str] = None
-    success: Optional[bool] = None
+    termination_reason: str | None = None
+    success: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class ReplayResult:
     terminal_state_hash: str
     state: ReplayState
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["state"] = asdict(self.state)
         return value
@@ -93,9 +93,7 @@ def replay_trace(trace_or_path: Trace | str | Path) -> ReplayResult:
                 state.workspace_state_hash
                 and payload["before_state_hash"] != state.workspace_state_hash
             ):
-                raise ValueError(
-                    "workspace_diff before_state_hash does not match replay state"
-                )
+                raise ValueError("workspace_diff before_state_hash does not match replay state")
             state.workspace_state_hash = payload["after_state_hash"]
         elif event.event_type is EventType.VERIFICATION_RESULT:
             state.verifications.append(dict(payload))

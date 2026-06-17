@@ -34,15 +34,23 @@ Current non-goals:
    logs store prompt hashes by default unless a run explicitly permits sanitized prompt text.
 8. Read secrets only from environment variables or a secret manager. Never place secrets in
    configuration files, logs, tests, or fixtures.
-9. Do not swallow exceptions. Convert recoverable model and tool failures into contextual states;
+9. Never attempt to upload, commit, push, publish, or otherwise transmit API keys, access tokens,
+   private API URLs, authorization headers, credentials, or other sensitive connection details.
+   Use sanitized placeholders in all tracked files and user-visible artifacts.
+10. Do not swallow exceptions. Convert recoverable model and tool failures into contextual states;
    fail fast on programming errors.
-10. Before adding a dependency, document its purpose, license, size, and alternatives, then set a
+11. Before adding a dependency, document its purpose, license, size, and alternatives, then set a
     reasonable lower version bound.
-11. Comments should explain constraints and reasoning rather than restate code. Public interfaces
+12. Comments should explain constraints and reasoning rather than restate code. Public interfaces
     should have concise docstrings.
-12. After completing each functional slice, run the smallest relevant test set immediately. Do not
+13. After completing each functional slice, run the smallest relevant test set immediately. Do not
     start the next slice or mark plan work complete until those tests pass. Run the full regression
     suite again at the end of each milestone.
+14. If `REVIEW.md` exists at the repository root, read and follow its additional local
+    development instructions. This file is intentionally excluded from version control.
+15. After completing any code change and its relevant tests, perform the review workflow defined
+    in `REVIEW.md`. Address every actionable finding and rerun affected tests before treating
+    the change as complete. If the local file does not exist, do not invent a replacement command.
 
 ## 3. Data and Experiment Standards
 
@@ -154,6 +162,18 @@ EAD_RUN_DOCKER_TESTS=1 PYTHONPATH=src python3 -m unittest tests.test_docker_inte
 
 This test requires a running Docker daemon and the pinned integration images documented in the
 test module.
+
+Live provider tests must be opt-in, use environment variables for credentials, minimize paid
+requests, and clean up temporary artifacts. Run the DeepSeek pipeline and Docker-agent checks with:
+
+```bash
+EAD_RUN_LIVE_LLM_TESTS=1 EAD_RUN_DOCKER_TESTS=1 \
+DEEPSEEK_API_KEY=... PYTHONPATH=src \
+  python3 -m unittest tests.test_live_llm_integration -v
+```
+
+Never enable paid live tests in default CI or commit provider credentials, CA bundles, or live run
+artifacts.
 
 A change is done only when code, tests, examples, documentation, and configuration agree, and no
 temporary artifacts or secrets are included.

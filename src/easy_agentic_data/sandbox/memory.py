@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
-from typing import Callable, Dict, List
+from collections.abc import Callable
 
 from .base import CommandResult, SandboxLimits
 
@@ -13,22 +12,22 @@ class MemorySandbox:
 
     def __init__(
         self,
-        files: Dict[str, str] | None = None,
-        commands: Dict[str, Callable[["MemorySandbox"], CommandResult] | CommandResult] | None = None,
+        files: dict[str, str] | None = None,
+        commands: dict[str, Callable[[MemorySandbox], CommandResult] | CommandResult] | None = None,
         limits: SandboxLimits | None = None,
     ) -> None:
         self.initial_files = dict(files or {})
         self.files = dict(self.initial_files)
         self.commands = dict(commands or {})
         self.limits = limits or SandboxLimits()
-        self.snapshots: Dict[str, Dict[str, str]] = {}
+        self.snapshots: dict[str, dict[str, str]] = {}
         self.created = False
 
     def create(self) -> None:
         self.files = dict(self.initial_files)
         self.created = True
 
-    def execute(self, command: List[str], *, timeout_seconds: float | None = None) -> CommandResult:
+    def execute(self, command: list[str], *, timeout_seconds: float | None = None) -> CommandResult:
         del timeout_seconds
         self._require_created()
         key = " ".join(command)
@@ -56,7 +55,7 @@ class MemorySandbox:
             raise ValueError("Workspace size limit exceeded")
         self.files[normalized] = content
 
-    def list_files(self, path: str = ".") -> List[str]:
+    def list_files(self, path: str = ".") -> list[str]:
         self._require_created()
         prefix = "" if path in {"", "."} else f"{_safe_path(path).rstrip('/')}/"
         return sorted(name for name in self.files if name.startswith(prefix))

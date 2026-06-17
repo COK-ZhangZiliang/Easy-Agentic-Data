@@ -70,7 +70,9 @@ class RegistryTests(unittest.TestCase):
             repository = Path(directory) / "repo"
             repository.mkdir()
             subprocess.run(["git", "init", "-q", str(repository)], check=True)
-            subprocess.run(["git", "-C", str(repository), "config", "user.name", "Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"], check=True
+            )
             subprocess.run(
                 ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
                 check=True,

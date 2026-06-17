@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from easy_agentic_data.models import stable_id
 from easy_agentic_data.scenarios import ScenarioInstance
@@ -14,7 +15,7 @@ from easy_agentic_data.traces.events import EventType, TraceEvent
 @dataclass(frozen=True)
 class Trace:
     path: Path
-    events: List[TraceEvent]
+    events: list[TraceEvent]
     trace_id: str
     truncated: bool = False
 
@@ -31,7 +32,7 @@ class TraceRecorder:
         path: str | Path,
         *,
         session_id: str,
-        scenario_instance: Optional[ScenarioInstance] = None,
+        scenario_instance: ScenarioInstance | None = None,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,14 +45,14 @@ class TraceRecorder:
             scenario_instance.sensitive_strings() if scenario_instance is not None else []
         )
 
-    def __enter__(self) -> "TraceRecorder":
+    def __enter__(self) -> TraceRecorder:
         return self
 
     def __exit__(self, *args: object) -> None:
         del args
         self.close()
 
-    def record(self, event_type: EventType | str, payload: Dict[str, Any]) -> TraceEvent:
+    def record(self, event_type: EventType | str, payload: dict[str, Any]) -> TraceEvent:
         if self._closed:
             raise RuntimeError("Cannot record an event after the trace recorder is closed")
         if self._finished:
@@ -100,7 +101,7 @@ class TraceRecorder:
             self._handle.close()
             self._closed = True
 
-    def _check_hidden_context(self, payload: Dict[str, Any]) -> None:
+    def _check_hidden_context(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True)
         for value in self._forbidden_values:
             escaped = json.dumps(value, ensure_ascii=True)[1:-1]
@@ -114,9 +115,9 @@ def load_trace(
     tolerate_truncated: bool = True,
 ) -> Trace:
     trace_path = Path(path)
-    events: List[TraceEvent] = []
+    events: list[TraceEvent] = []
     truncated = False
-    expected_session: Optional[str] = None
+    expected_session: str | None = None
 
     with trace_path.open("rb") as handle:
         while True:
@@ -134,9 +135,7 @@ def load_trace(
 
             event = TraceEvent.from_dict(value)
             if event.sequence != len(events):
-                raise ValueError(
-                    f"Invalid trace sequence {event.sequence}; expected {len(events)}"
-                )
+                raise ValueError(f"Invalid trace sequence {event.sequence}; expected {len(events)}")
             if expected_session is None:
                 expected_session = event.session_id
             elif event.session_id != expected_session:
@@ -155,9 +154,7 @@ def _validate_event_order(events: Iterable[TraceEvent]) -> None:
     if items[0].event_type is not EventType.SESSION_STARTED:
         raise ValueError("The first trace event must be session_started")
     finished_indexes = [
-        index
-        for index, event in enumerate(items)
-        if event.event_type is EventType.SESSION_FINISHED
+        index for index, event in enumerate(items) if event.event_type is EventType.SESSION_FINISHED
     ]
     if len(finished_indexes) > 1:
         raise ValueError("A trace can contain only one session_finished event")

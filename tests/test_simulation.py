@@ -32,6 +32,22 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(response.content, "2")
         self.assertNotIn("EVALUATOR_CANARY", response.content or "")
         self.assertEqual(simulator.metrics.clarifications, 1)
+        self.assertEqual(simulator.metrics.goal_alignment, 1.0)
+        self.assertEqual(simulator.metrics.disclosure_violations, 0)
+
+    def test_simulator_quality_metrics_detect_unavailable_fact_requests(self) -> None:
+        instance = _instance()
+        simulator = RuleBasedUserSimulator(instance)
+
+        response = simulator.respond(
+            UserObservation("What is the deployment password?", instance.public_task.query, 1)
+        )
+
+        self.assertEqual(response.action, "refuse")
+        self.assertEqual(simulator.metrics.unavailable_fact_requests, 1)
+        self.assertEqual(simulator.metrics.unavailable_fact_leaks, 0)
+        self.assertLess(simulator.metrics.goal_alignment, 1.0)
+        self.assertIn("simulator_error_rate", simulator.metrics.to_dict())
 
     def test_agent_uses_ask_user_in_multi_turn_trace(self) -> None:
         class AskThenFinish:
@@ -71,7 +87,9 @@ class SimulationTests(unittest.TestCase):
         simulator = RuleBasedUserSimulator(instance)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "conversation.jsonl"
-            with TraceRecorder(path, session_id="session_user", scenario_instance=instance) as recorder:
+            with TraceRecorder(
+                path, session_id="session_user", scenario_instance=instance
+            ) as recorder:
                 result = HeadlessAgent(AskThenFinish(), tools).run(
                     instance,
                     recorder,
@@ -98,9 +116,7 @@ class SimulationTests(unittest.TestCase):
                 return LLMResponse(
                     Message(
                         "assistant",
-                        json.dumps(
-                            {"content": "2", "action": "clarify", "reason": "known fact"}
-                        ),
+                        json.dumps({"content": "2", "action": "clarify", "reason": "known fact"}),
                     ),
                     self.model,
                 )
@@ -120,9 +136,11 @@ def _instance() -> ScenarioInstance:
             PublicTaskContext("Fix the configured value."),
             hidden_user=HiddenUserContext(
                 goal="Help configure the requested public behavior.",
+                goal_components={"target_value": "target value"},
                 known_facts={"target_value": 2},
                 unavailable_facts=["deployment password"],
                 patience_turns=3,
+                disclosure_policy={"only_when_asked": ["target_value"]},
             ),
         ),
         EnvironmentSpec(name="user-fixture", version="1"),

@@ -1,5 +1,5 @@
-import os
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -15,15 +15,8 @@ from easy_agentic_data.scenarios import Scenario, ScenarioInstance
 from easy_agentic_data.seeds import PublicTaskContext, QuerySeed
 from easy_agentic_data.traces import TraceRecorder, load_trace, replay_trace
 
-
-IMAGE = (
-    "python@sha256:"
-    "f417205fec4ccb0d5023fdb5ecb4c8eba31c1834f94dcbcd1a2e8325fa7a7b89"
-)
-GIT_IMAGE = (
-    "alpine/git@sha256:"
-    "4a0e72d49596a1f5d3701aeedafdadc5c0da4062be4657c7bdc4017387f591cc"
-)
+IMAGE = "python@sha256:f417205fec4ccb0d5023fdb5ecb4c8eba31c1834f94dcbcd1a2e8325fa7a7b89"
+GIT_IMAGE = "alpine/git@sha256:4a0e72d49596a1f5d3701aeedafdadc5c0da4062be4657c7bdc4017387f591cc"
 
 
 @unittest.skipUnless(
@@ -89,9 +82,7 @@ class DockerIntegrationTests(unittest.TestCase):
                 self.assertEqual(restored_hash, initial_hash)
                 self.assertNotEqual(sandbox.container_name, first_container)
 
-                inspect = sandbox._run_host(
-                    ["docker", "inspect", sandbox.container_name]
-                )
+                inspect = sandbox._run_host(["docker", "inspect", sandbox.container_name])
                 self.assertNotIn("/var/run/docker.sock", inspect.stdout)
                 self.assertIn('"ReadonlyRootfs": true', inspect.stdout)
                 self.assertIn('"NetworkMode": "none"', inspect.stdout)

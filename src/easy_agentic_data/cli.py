@@ -4,9 +4,9 @@ import argparse
 import json
 import shlex
 import tempfile
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Sequence
 
 from easy_agentic_data.agent import HeadlessAgent
 from easy_agentic_data.batch import (
@@ -15,13 +15,14 @@ from easy_agentic_data.batch import (
     RolloutOutcome,
     RunBudget,
 )
-from easy_agentic_data.coding_tools import CodingToolRuntime, SCHEMAS
+from easy_agentic_data.coding_tools import SCHEMAS, CodingToolRuntime
 from easy_agentic_data.config import PipelineConfig, load_config
 from easy_agentic_data.evaluation import (
     EvaluationSuite,
     ForbiddenStateEvaluator,
     HiddenCommandEvaluator,
     RequiredStateEvaluator,
+    derive_turn_rewards,
     finalize_evaluation_trace,
 )
 from easy_agentic_data.llm.mock import MockLLMClient
@@ -167,9 +168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.batch_command == "enqueue":
             scenarios = ScenarioRegistry(args.registry).list_scenarios()
             scheduler.submit(
-                RolloutJob(
-                    scenario["scenario_id"], rollout, args.model, args.config_hash
-                )
+                RolloutJob(scenario["scenario_id"], rollout, args.model, args.config_hash)
                 for scenario in scenarios
                 for rollout in range(args.rollouts)
             )
@@ -262,19 +261,27 @@ def _run_registry_scenario(
                     for command in instance.hidden_evaluator.hidden_tests
                 ]
                 evaluators.extend([RequiredStateEvaluator(), ForbiddenStateEvaluator()])
+                turn_rewards = derive_turn_rewards(load_trace(trace_path), instance)
+                diagnostics = {
+                    "turns": float(run_result.turns),
+                    "tool_calls": float(run_result.tool_calls),
+                    "tokens": float(run_result.tokens),
+                    "user_turns": float(user.metrics.turns),
+                }
+                diagnostics.update(
+                    {
+                        key: float(value)
+                        for key, value in user.metrics.to_dict().items()
+                        if isinstance(value, (int, float))
+                    }
+                )
                 report = EvaluationSuite(evaluators).evaluate(
                     sandbox,
                     instance,
-                    diagnostics={
-                        "turns": float(run_result.turns),
-                        "tool_calls": float(run_result.tool_calls),
-                        "tokens": float(run_result.tokens),
-                        "user_turns": float(user.metrics.turns),
-                    },
+                    diagnostics=diagnostics,
+                    turn_rewards=turn_rewards,
                 )
-                finalize_evaluation_trace(
-                    recorder, report, final_state_hash=sandbox.state_hash()
-                )
+                finalize_evaluation_trace(recorder, report, final_state_hash=sandbox.state_hash())
             trace = load_trace(trace_path)
             return RolloutOutcome(
                 trace_id=trace.trace_id,

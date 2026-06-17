@@ -51,28 +51,40 @@ The first production-capable release must:
 - [x] Best-of-N SFT and preference exports
 - [x] Dependency-free mock end-to-end pipeline
 - [x] English-only documentation and code-comment policy
+- [x] Versioned scenarios, append-only traces, artifact storage, and deterministic replay
+- [x] Rootless Docker sandbox with policy-governed coding tools
+- [x] Query seed and environment registry with deterministic materialization
+- [x] Rule-based and LLM-backed multi-turn user simulation
+- [x] Deterministic evaluation and SFT, preference, RL, and analysis exports
+- [x] Persistent batch scheduling, recovery, and supporting reliability utilities
+- [x] DeepSeek V4 Flash and generic local OpenAI-compatible provider validation
 
-The current `AgentRunner` and `ToolRegistry` are prototypes. They do not yet provide workspace
-isolation, scenario-bound environments, multi-turn simulated users, replay, or deterministic coding
-task evaluation.
+The core P0-P4 architecture and the P5 scheduler are implemented. Production integration remains
+for registry health checks, independent resource gates, call caching, hard budget admission,
+quality-report commands, and review sampling. The lightweight `AgentRunner` pipeline remains as a
+dependency-free demonstration path, while `HeadlessAgent` is the scenario-bound runtime for
+sandboxed coding trajectories.
 
 ## Architecture Boundaries
 
-The target package layout is:
+The current package layout is:
 
 ```text
 src/easy_agentic_data/
-  agent/          # Agent loop, context construction, and stopping policies
-  environments/   # Environment specifications, provisioning, reset, and snapshots
-  sandbox/        # Isolated command and filesystem execution backends
-  tools/          # Tool contracts, policy metadata, and capability packs
-  simulation/     # Simulated user state and interaction policy
-  seeds/          # Query seed and scenario registries
-  traces/         # Append-only events, artifacts, replay, and state hashing
-  evaluators/     # Tests, state comparison, policy checks, and reward construction
-  synthesis/      # Rollout orchestration, scheduling, recovery, and selection
-  exporters/      # SFT, preference, reward-model, and RL formats
-  llm/            # Model-provider protocol adapters and observability
+  agent/               # Headless agent loop and stopping policies
+  environments/        # Reproducible environment specifications
+  sandbox/             # Docker and in-memory execution backends
+  seeds/               # Query seed contracts
+  traces/              # Append-only events, artifacts, replay, and state hashing
+  llm/                 # Provider adapters, mocks, and observability
+  coding_tools.py      # Policy-governed coding capability pack
+  scenarios.py         # Public and hidden scenario contexts
+  registry.py          # Git registry validation and SQLite discovery index
+  simulation.py        # Rule-based and LLM-backed simulated users
+  evaluation.py        # Deterministic evaluators and reward reports
+  trace_exporters.py   # Canonical trace dataset exports
+  batch.py             # Persistent scheduling, recovery, and quality reports
+  pipeline.py          # Lightweight synthetic function-tool demonstration
 ```
 
 Rules:
@@ -180,6 +192,7 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add task import from issue/commit pairs without exposing the reference patch.
 - [x] Add semantic and exact duplicate detection hooks.
 - [x] Add CLI commands to list, validate, materialize, and inspect registry entries.
+- [ ] Execute each environment `health_check` during materialization and repeated reset validation.
 
 ### Deliverables
 
@@ -191,7 +204,8 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 
 - Every scenario can be recreated from registry metadata and content-addressed artifacts.
 - Registry validation detects train/evaluation leakage by source and content hash.
-- At least 20 fixture scenarios pass environment health checks after repeated resets.
+- Twenty in-memory reset fixtures currently reproduce identical state. Registry-backed health-check
+  execution remains open.
 
 ## P3: Simulated User and Multi-Turn Interaction
 
@@ -201,6 +215,8 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 
 - [x] Define hidden `UserState`: goal, persona, known facts, unavailable facts, constraints, and
   patience policy.
+- [x] Add goal-component, disclosure-policy, stop-condition, and business-knowledge reference
+  fields for profile-conditioned simulated users.
 - [x] Define the simulated-user observation boundary.
 - [x] Ensure the user model cannot access hidden tests, evaluator code, reference patches, or raw
   agent system prompts.
@@ -214,6 +230,8 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add leakage probes and canary values to detect hidden-context exposure.
 - [x] Measure interaction diversity, clarification rate, contradiction rate, and premature
   termination.
+- [x] Measure simulator goal alignment, disclosure violations, unavailable-fact requests and
+  leaks, and critical simulator errors.
 
 ### Deliverables
 
@@ -248,7 +266,11 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add SFT export from successful observable traces.
 - [x] Add preference export from candidates with deterministic reward differences.
 - [x] Add RL episode export with observations, actions, rewards, termination reason, and masks.
+- [x] Add a derived RL episode v1 export with explicit assistant action type, action mask, loss
+  mask, and separated outcome versus turn reward components.
 - [x] Preserve failed and policy-denied trajectories in a separate analysis dataset.
+- [x] Add deterministic turn reward evidence for policy denials, tool execution, and user
+  information-gathering actions.
 
 ### Deliverables
 
@@ -273,16 +295,19 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add persistent scheduling and checkpoint recovery.
 - [x] Resume interrupted runs without repeating completed rollouts.
 - [x] Add bounded retries for transient model, sandbox, and artifact-store failures.
-- [x] Add provider-level rate limiting and exponential backoff.
-- [x] Add model-call caching where sampling semantics permit it.
-- [x] Add concurrency controls for model endpoints, sandboxes, and artifact writes.
-- [x] Add per-run token, time, and monetary budgets with hard termination.
-- [x] Add health monitoring for local model endpoints and sandbox workers.
-- [x] Add dataset manifests with exact scenario, model, prompt, tool, image, evaluator, and exporter
+- [x] Add provider HTTP retry backoff and a reusable rate-limiter primitive.
+- [ ] Wire provider-level rate limiting into rollout workers.
+- [ ] Wire model-call caching into deterministic or cache-safe sampling paths.
+- [ ] Apply independent model, sandbox, and artifact concurrency gates in the scheduler.
+- [ ] Enforce token, time, and monetary budgets before admitting additional work.
+- [ ] Integrate local model endpoint and sandbox worker health checks into batch execution.
+- [ ] Emit dataset manifests with exact scenario, model, prompt, tool, image, evaluator, and exporter
   versions.
-- [x] Add quality reports for coverage, duplicates, success rate, pass@k, tool usage, interaction
+- [ ] Expose quality reports for coverage, duplicates, success rate, pass@k, tool usage, interaction
   depth, policy denials, and infrastructure failures.
-- [x] Add sampled human-review queues and reviewer feedback ingestion.
+- [x] Add reward variance, low-information rollout group, goal-type success, simulator-error, and
+  goal-alignment diagnostics to batch quality reports.
+- [ ] Add configurable human-review sampling and reviewer feedback ingestion.
 - [x] Add a pluggable worker protocol after stabilizing the local scheduler contract.
 
 ### Deliverables
@@ -313,8 +338,9 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 
 - [x] Threat-model sandbox escape, prompt injection, secret exposure, artifact poisoning, and
   denial-of-service paths before P1 completion.
-- [x] Add adversarial scenarios for path traversal, symlink-style escapes, command expansion, oversized output,
-  fork bombs, and network access.
+- [x] Add adversarial scenarios for path traversal, command expansion, oversized output, and
+  network access.
+- [ ] Add explicit Docker integration tests for symlink traversal and process-exhaustion containment.
 - [x] Require explicit review before enabling a new side-effecting capability pack.
 
 ### Data Governance
@@ -330,17 +356,16 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add a tool-calling capability probe for use before expensive rollouts.
 - [x] Keep provider-specific chat-template handling outside canonical traces.
 
-## Recommended Execution Order
+## Implementation Sequence
 
-1. Complete P0 before introducing a privileged sandbox.
-2. Build P1 against small, deterministic fixture repositories.
-3. Begin P2 once environment reset and state hashing are stable.
-4. Add P3 only after hidden/public context separation is enforced structurally.
-5. Complete deterministic P4 evaluation before scaling rollout volume.
-6. Begin P5 after one local batch can be reproduced end to end.
+The phases were completed in this order:
 
-P0 and sandbox threat modeling may proceed in parallel. Dataset exporters should be updated only
-after the canonical event schema is stable enough to avoid repeated migrations.
+1. P0 established canonical contracts and replay before privileged execution.
+2. P1 added the sandboxed coding agent against deterministic fixture repositories.
+3. P2 added reproducible query and environment registries.
+4. P3 added simulated users after hidden/public context separation was enforced.
+5. P4 made deterministic environment evaluation the primary reward.
+6. P5 added recoverable batch execution after local end-to-end reproducibility was established.
 
 ## Key Risks and Mitigations
 
@@ -375,3 +400,7 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-06-12 | Completed P0 canonical scenario contracts, content-addressed artifacts, append-only trace recording, strict loading, hidden-context guards, and event-only replay. |
 | 2026-06-12 | Implemented P1-P5 library and CLI workflows with per-feature tests. |
 | 2026-06-12 | Installed Docker CLI and Colima, then passed real container isolation and end-to-end headless coding-agent integration tests. |
+| 2026-06-15 | Validated DeepSeek V4 Flash with real structured generation, tool calls, semantic evaluation, dataset export, and a Docker coding-agent repair trajectory. |
+| 2026-06-15 | Added provider request options, reasoning-context round trips, bounded HTTP retries, response validation, policy-filtered tool schemas, improved prompts, and opt-in live-provider tests. |
+| 2026-06-15 | Synchronized implementation status and package layout, documented remaining P2/P5 integration gaps, rejected empty generation batches, and excluded provider reasoning context from canonical datasets. |
+| 2026-06-17 | Added RL episode action/loss-mask exports, deterministic turn rewards, simulator goal-state metrics, and batch reward-variance diagnostics. |

@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 def utc_now() -> str:
@@ -20,13 +20,14 @@ def stable_id(prefix: str, value: Any) -> str:
 @dataclass
 class Message:
     role: str
-    content: Optional[str] = None
-    name: Optional[str] = None
-    tool_call_id: Optional[str] = None
-    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    content: str | None = None
+    name: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    reasoning_content: str | None = None
 
-    def to_api_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {"role": self.role}
+    def to_api_dict(self, *, include_reasoning_content: bool = False) -> dict[str, Any]:
+        data: dict[str, Any] = {"role": self.role}
         if self.content is not None:
             data["content"] = self.content
         if self.name is not None:
@@ -35,6 +36,8 @@ class Message:
             data["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
             data["tool_calls"] = self.tool_calls
+        if include_reasoning_content and self.reasoning_content is not None:
+            data["reasoning_content"] = self.reasoning_content
         return data
 
 
@@ -42,8 +45,9 @@ class Message:
 class LLMResponse:
     message: Message
     model: str
-    usage: Dict[str, int] = field(default_factory=dict)
-    raw: Dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, int] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+    retry_count: int = 0
 
 
 @dataclass
@@ -51,10 +55,10 @@ class Task:
     instruction: str
     category: str = "general"
     difficulty: int = 1
-    constraints: List[str] = field(default_factory=list)
-    expected_tools: List[str] = field(default_factory=list)
-    reference: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    constraints: list[str] = field(default_factory=list)
+    expected_tools: list[str] = field(default_factory=list)
+    reference: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     task_id: str = ""
 
     def __post_init__(self) -> None:
@@ -73,9 +77,9 @@ class Task:
 class ToolEvent:
     call_id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
     output: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     latency_ms: float = 0.0
 
 
@@ -85,19 +89,19 @@ class Verification:
     passed: bool
     score: float
     reason: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Trajectory:
     task: Task
-    messages: List[Message]
-    tool_events: List[ToolEvent] = field(default_factory=list)
-    verifications: List[Verification] = field(default_factory=list)
+    messages: list[Message]
+    tool_events: list[ToolEvent] = field(default_factory=list)
+    verifications: list[Verification] = field(default_factory=list)
     reward: float = 0.0
     status: str = "completed"
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     trajectory_id: str = ""
     created_at: str = field(default_factory=utc_now)
 
@@ -112,8 +116,10 @@ class Trajectory:
                 },
             )
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["messages"] = [message.to_api_dict() for message in self.messages]
+        return data
 
 
 @dataclass
@@ -135,5 +141,11 @@ class PreferencePair:
                 },
             )
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task": asdict(self.task),
+            "chosen": self.chosen.to_dict(),
+            "rejected": self.rejected.to_dict(),
+            "margin": self.margin,
+            "pair_id": self.pair_id,
+        }

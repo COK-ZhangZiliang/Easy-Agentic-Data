@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Sequence
+import re
+from collections.abc import Sequence
+from typing import Any
 
 from easy_agentic_data.models import LLMResponse, Message
 
@@ -17,13 +19,16 @@ class MockLLMClient:
     def complete(
         self,
         messages: Sequence[Message],
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: list[dict[str, Any]] | None = None,
         *,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
-        del temperature, max_tokens
-        system = next((message.content or "" for message in messages if message.role == "system"), "")
+        del temperature, max_tokens, response_format
+        system = next(
+            (message.content or "" for message in messages if message.role == "system"), ""
+        )
         last = messages[-1]
 
         if "TASK_DESIGNER" in system:
@@ -49,7 +54,8 @@ class MockLLMClient:
             return LLMResponse(Message("assistant", content), self.model)
 
         if "TASK_EVOLVER" in system:
-            task = json.loads(last.content or "{}")
+            content = last.content or "{}"
+            task = json.loads(content[content.find("{") :])
             task["instruction"] += " Also state which operands were used."
             task["difficulty"] = min(5, int(task.get("difficulty", 1)) + 1)
             task.setdefault("constraints", []).append("State the operands in the final answer.")
@@ -92,15 +98,14 @@ class MockLLMClient:
 
 
 def _extract_requested_count(text: str) -> int:
-    marker = "COUNT="
-    if marker not in text:
+    match = re.search(r"\bCOUNT=(\d+)\b", text)
+    if match is None:
         return 1
-    suffix = text.split(marker, 1)[1].split()[0]
-    return max(1, int(suffix))
+    return max(1, int(match.group(1)))
 
 
 def _numbers_from_text(text: str) -> tuple[float, float]:
-    numbers: List[float] = []
+    numbers: list[float] = []
     for token in text.replace(",", " ").split():
         cleaned = token.strip(".,;:!?")
         try:

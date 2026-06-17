@@ -6,11 +6,12 @@ import sqlite3
 import threading
 import time
 import urllib.request
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Protocol
+from typing import Any, Protocol
 
 
 class JobStatus(str, Enum):
@@ -44,7 +45,7 @@ class RolloutOutcome:
     infrastructure_failure: bool = False
     tokens: int = 0
     cost: float = 0.0
-    metrics: Dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)
     error: str = ""
 
 
@@ -76,8 +77,12 @@ class PersistentScheduler:
                     VALUES (?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
-                        job.job_id, job.scenario_id, job.rollout_index, job.model,
-                        job.config_hash, JobStatus.PENDING.value,
+                        job.job_id,
+                        job.scenario_id,
+                        job.rollout_index,
+                        job.model,
+                        job.config_hash,
+                        JobStatus.PENDING.value,
                     ),
                 )
 
@@ -96,7 +101,7 @@ class PersistentScheduler:
         max_retries: int = 2,
         budget: RunBudget | None = None,
         max_jobs: int | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         budget = budget or RunBudget()
         started = time.monotonic()
         totals = {"tokens": 0, "cost": 0.0, "processed": 0}
@@ -107,7 +112,13 @@ class PersistentScheduler:
 
         def execute(job: RolloutJob) -> tuple[RolloutJob, RolloutOutcome]:
             self._mark_running(job.job_id)
-            outcome = worker.run(job)
+            try:
+                outcome = worker.run(job)
+            except Exception as exc:
+                outcome = RolloutOutcome(
+                    infrastructure_failure=True,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             return job, outcome
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -128,14 +139,14 @@ class PersistentScheduler:
                     break
         return {**totals, "status_counts": self.status_counts()}
 
-    def status_counts(self) -> Dict[str, int]:
+    def status_counts(self) -> dict[str, int]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
             ).fetchall()
         return {row["status"]: row["count"] for row in rows}
 
-    def completed_rows(self) -> List[Dict[str, Any]]:
+    def completed_rows(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM jobs WHERE status = ? ORDER BY job_id",
@@ -143,7 +154,7 @@ class PersistentScheduler:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def _pending_jobs(self) -> List[RolloutJob]:
+    def _pending_jobs(self) -> list[RolloutJob]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM jobs WHERE status = ? ORDER BY job_id",
@@ -151,8 +162,11 @@ class PersistentScheduler:
             ).fetchall()
         return [
             RolloutJob(
-                row["scenario_id"], row["rollout_index"], row["model"],
-                row["config_hash"], row["job_id"],
+                row["scenario_id"],
+                row["rollout_index"],
+                row["model"],
+                row["config_hash"],
+                row["job_id"],
             )
             for row in rows
         ]
@@ -183,9 +197,14 @@ class PersistentScheduler:
                 cost = ?, metrics = ?, error = ? WHERE job_id = ?
                 """,
                 (
-                    status.value, outcome.trace_id, int(outcome.success), outcome.tokens,
-                    outcome.cost, json.dumps(outcome.metrics, sort_keys=True),
-                    outcome.error, job.job_id,
+                    status.value,
+                    outcome.trace_id,
+                    int(outcome.success),
+                    outcome.tokens,
+                    outcome.cost,
+                    json.dumps(outcome.metrics, sort_keys=True),
+                    outcome.error,
+                    job.job_id,
                 ),
             )
 
@@ -258,7 +277,7 @@ class JsonCallCache:
             json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
         )
 
-    def get_or_compute(self, key: Dict[str, Any], compute: Callable[[], Any]) -> Any:
+    def get_or_compute(self, key: dict[str, Any], compute: Callable[[], Any]) -> Any:
         digest = hashlib.sha256(
             json.dumps(key, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -269,7 +288,7 @@ class JsonCallCache:
         return self.values[digest]
 
 
-def endpoint_health(url: str, timeout_seconds: float = 2.0) -> Dict[str, Any]:
+def endpoint_health(url: str, timeout_seconds: float = 2.0) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
             return {"healthy": 200 <= response.status < 300, "status": response.status}
@@ -277,7 +296,7 @@ def endpoint_health(url: str, timeout_seconds: float = 2.0) -> Dict[str, Any]:
         return {"healthy": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def worker_health(check: Callable[[], Any]) -> Dict[str, Any]:
+def worker_health(check: Callable[[], Any]) -> dict[str, Any]:
     try:
         detail = check()
         return {"healthy": True, "detail": detail}
@@ -293,9 +312,10 @@ def write_release_manifest(path: str | Path, **versions: Any) -> None:
     Path(path).write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def quality_report(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def quality_report(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     items = list(rows)
     successes = sum(int(row.get("success", 0)) for row in items)
+    rewards = [_row_reward(row) for row in items]
     traces = [row.get("trace_id", "") for row in items if row.get("trace_id")]
     metrics = []
     for row in items:
@@ -304,17 +324,47 @@ def quality_report(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             value = json.loads(value or "{}")
         metrics.append(value)
     metric_keys = {
-        "tool_calls", "tool_errors", "user_turns", "turns", "tokens", "policy_denials"
+        "tool_calls",
+        "tool_errors",
+        "user_turns",
+        "turns",
+        "tokens",
+        "policy_denials",
+        "turn_reward_total",
+        "turn_reward_mean",
+        "simulator_error_rate",
+        "goal_alignment",
     }
     aggregates = {
-        key: sum(float(item.get(key, 0.0)) for item in metrics) / len(metrics)
-        if metrics else 0.0
+        key: sum(float(item.get(key, 0.0)) for item in metrics) / len(metrics) if metrics else 0.0
         for key in metric_keys
     }
+    reward_groups: dict[str, list[float]] = {}
+    success_by_goal_type: dict[str, dict[str, float]] = {}
+    for row, reward in zip(items, rewards):
+        scenario_id = str(row.get("scenario_id") or row.get("prompt_group") or "default")
+        reward_groups.setdefault(scenario_id, []).append(reward)
+        goal_type = str(row.get("goal_type") or row.get("category") or "")
+        if goal_type:
+            bucket = success_by_goal_type.setdefault(goal_type, {"successes": 0.0, "rollouts": 0.0})
+            bucket["successes"] += float(int(row.get("success", 0)))
+            bucket["rollouts"] += 1.0
+    goal_success_rates = {
+        key: value["successes"] / value["rollouts"] if value["rollouts"] else 0.0
+        for key, value in success_by_goal_type.items()
+    }
+    group_stds = [_std(values) for values in reward_groups.values() if len(values) > 1]
     return {
         "rollouts": len(items),
         "successes": successes,
         "success_rate": successes / len(items) if items else 0.0,
+        "episode_reward_mean": sum(rewards) / len(rewards) if rewards else 0.0,
+        "episode_reward_std": _std(rewards),
+        "in_group_reward_std_mean": sum(group_stds) / len(group_stds) if group_stds else 0.0,
+        "low_information_groups": sorted(
+            key for key, values in reward_groups.items() if len(values) > 1 and _std(values) == 0.0
+        ),
+        "success_by_goal_type": goal_success_rates,
         "unique_traces": len(set(traces)),
         "duplicate_traces": len(traces) - len(set(traces)),
         "infrastructure_failures": sum(
@@ -324,19 +374,31 @@ def quality_report(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def enqueue_human_review(path: str | Path, record: Dict[str, Any]) -> None:
+def enqueue_human_review(path: str | Path, record: dict[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def load_human_reviews(path: str | Path) -> List[Dict[str, Any]]:
+def load_human_reviews(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
     if not source.exists():
         return []
     return [
-        json.loads(line)
-        for line in source.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
+
+
+def _row_reward(row: dict[str, Any]) -> float:
+    if "reward" in row:
+        return float(row["reward"])
+    return float(int(row.get("success", 0)))
+
+
+def _std(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return variance**0.5

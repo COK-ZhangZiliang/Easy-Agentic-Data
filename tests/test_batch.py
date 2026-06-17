@@ -27,9 +27,7 @@ class BatchTests(unittest.TestCase):
 
             def run(self, job):
                 self.calls.append(job.job_id)
-                return RolloutOutcome(
-                    trace_id=f"trace_{job.job_id}", success=True, tokens=10
-                )
+                return RolloutOutcome(trace_id=f"trace_{job.job_id}", success=True, tokens=10)
 
         with tempfile.TemporaryDirectory() as directory:
             scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
@@ -68,6 +66,29 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(worker.calls, 2)
         self.assertEqual(rows[0]["trace_id"], "trace_ok")
 
+    def test_worker_exception_is_recorded_and_retried(self) -> None:
+        class RaisingWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, job):
+                del job
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("worker crashed")
+                return RolloutOutcome(trace_id="trace_recovered", success=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
+            scheduler.submit([RolloutJob("scenario", 0, "model", "config")])
+            worker = RaisingWorker()
+            first = scheduler.run(worker, max_retries=1)
+            second = scheduler.run(worker, max_retries=1)
+
+        self.assertEqual(first["status_counts"]["pending"], 1)
+        self.assertEqual(second["status_counts"]["completed"], 1)
+        self.assertEqual(worker.calls, 2)
+
     def test_cache_manifest_quality_and_review_queue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -90,8 +111,24 @@ class BatchTests(unittest.TestCase):
             enqueue_human_review(review, {"trace_id": "trace_a", "reason": "sample"})
             report = quality_report(
                 [
-                    {"trace_id": "trace_a", "success": 1, "status": "completed"},
-                    {"trace_id": "trace_a", "success": 0, "status": "failed"},
+                    {
+                        "trace_id": "trace_a",
+                        "scenario_id": "scenario_a",
+                        "success": 1,
+                        "reward": 1.0,
+                        "status": "completed",
+                        "goal_type": "refund",
+                        "metrics": {"simulator_error_rate": 0.0, "goal_alignment": 1.0},
+                    },
+                    {
+                        "trace_id": "trace_a",
+                        "scenario_id": "scenario_a",
+                        "success": 0,
+                        "reward": 0.0,
+                        "status": "failed",
+                        "goal_type": "refund",
+                        "metrics": {"simulator_error_rate": 0.5, "goal_alignment": 0.5},
+                    },
                 ]
             )
             payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -102,6 +139,10 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(calls, [1])
         self.assertEqual(payload["models"]["agent"], "m")
         self.assertEqual(report["duplicate_traces"], 1)
+        self.assertEqual(report["episode_reward_mean"], 0.5)
+        self.assertEqual(report["success_by_goal_type"]["refund"], 0.5)
+        self.assertGreater(report["in_group_reward_std_mean"], 0.0)
+        self.assertEqual(report["average_metrics"]["goal_alignment"], 0.75)
         self.assertEqual(len(review_lines), 1)
         self.assertEqual(reviews[0]["trace_id"], "trace_a")
 
@@ -112,9 +153,7 @@ class BatchTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
-            scheduler.submit(
-                [RolloutJob(f"s{index}", 0, "m", "c") for index in range(3)]
-            )
+            scheduler.submit([RolloutJob(f"s{index}", 0, "m", "c") for index in range(3)])
             summary = scheduler.run(
                 ExpensiveWorker(),
                 max_workers=1,
@@ -133,9 +172,7 @@ class BatchTests(unittest.TestCase):
                 raise RuntimeError("transient")
             return "ok"
 
-        result = retry_with_backoff(
-            operation, retries=3, initial_delay=0.5, sleep=delays.append
-        )
+        result = retry_with_backoff(operation, retries=3, initial_delay=0.5, sleep=delays.append)
         self.assertEqual(result, "ok")
         self.assertEqual(delays, [0.5, 1.0])
         self.assertTrue(worker_health(lambda: {"sandbox": "ready"})["healthy"])

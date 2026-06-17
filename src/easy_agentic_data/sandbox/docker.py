@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import List
 
 from .base import CommandResult, SandboxLimits
 
@@ -41,23 +39,52 @@ class DockerSandbox:
         self._run_host(["docker", "volume", "create", self.volume_name])
         self._run_host(
             [
-                "docker", "create", "--name", self.container_name,
-                "--user", "65532:65532", "--read-only",
-                "--network", "bridge" if self.network_enabled else "none",
-                "--cpus", str(self.limits.cpus), "--memory", self.limits.memory,
-                "--pids-limit", str(self.limits.pids),
-                "--mount", f"type=volume,src={self.volume_name},dst=/workspace",
-                "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-                "-w", "/workspace", "--entrypoint", "sleep", self.image_digest, "infinity",
+                "docker",
+                "create",
+                "--name",
+                self.container_name,
+                "--user",
+                "65532:65532",
+                "--read-only",
+                "--network",
+                "bridge" if self.network_enabled else "none",
+                "--cpus",
+                str(self.limits.cpus),
+                "--memory",
+                self.limits.memory,
+                "--pids-limit",
+                str(self.limits.pids),
+                "--mount",
+                f"type=volume,src={self.volume_name},dst=/workspace",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=64m",
+                "-w",
+                "/workspace",
+                "--entrypoint",
+                "sleep",
+                self.image_digest,
+                "infinity",
             ]
         )
         self._run_host(["docker", "start", self.container_name])
-        self._run_host(["docker", "cp", f"{self.source_directory}/.", f"{self.container_name}:/workspace"])
         self._run_host(
-            ["docker", "exec", "--user", "0:0", self.container_name, "chown", "-R", "65532:65532", "/workspace"]
+            ["docker", "cp", f"{self.source_directory}/.", f"{self.container_name}:/workspace"]
+        )
+        self._run_host(
+            [
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                self.container_name,
+                "chown",
+                "-R",
+                "65532:65532",
+                "/workspace",
+            ]
         )
 
-    def execute(self, command: List[str], *, timeout_seconds: float | None = None) -> CommandResult:
+    def execute(self, command: list[str], *, timeout_seconds: float | None = None) -> CommandResult:
         started = time.perf_counter()
         completed = self._run_host(
             ["docker", "exec", self.container_name, *command],
@@ -68,8 +95,11 @@ class DockerSandbox:
         stderr, err_cut = _bounded(completed.stderr, self.limits.max_output_bytes)
         self._check_workspace_size()
         return CommandResult(
-            completed.returncode, stdout, stderr,
-            (time.perf_counter() - started) * 1000, out_cut or err_cut,
+            completed.returncode,
+            stdout,
+            stderr,
+            (time.perf_counter() - started) * 1000,
+            out_cut or err_cut,
         )
 
     def read(self, path: str) -> str:
@@ -81,22 +111,36 @@ class DockerSandbox:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
-            self._run_host(["docker", "cp", handle.name, f"{self.container_name}:/workspace/{path}"])
+            self._run_host(
+                ["docker", "cp", handle.name, f"{self.container_name}:/workspace/{path}"]
+            )
         self._run_host(
             [
-                "docker", "exec", "--user", "0:0", self.container_name,
-                "chown", "65532:65532", f"/workspace/{path}",
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                self.container_name,
+                "chown",
+                "65532:65532",
+                f"/workspace/{path}",
             ]
         )
         self._run_host(
             [
-                "docker", "exec", "--user", "0:0", self.container_name,
-                "chmod", "0644", f"/workspace/{path}",
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                self.container_name,
+                "chmod",
+                "0644",
+                f"/workspace/{path}",
             ]
         )
         self._check_workspace_size()
 
-    def list_files(self, path: str = ".") -> List[str]:
+    def list_files(self, path: str = ".") -> list[str]:
         _safe_relative(path)
         result = self.execute(["find", path, "-type", "f", "-print"])
         return sorted(line.removeprefix("./") for line in result.stdout.splitlines())
@@ -109,10 +153,7 @@ class DockerSandbox:
             [
                 "sh",
                 "-lc",
-                (
-                    "find . -path './.git' -prune -o -type f -print0 "
-                    "| sort -z | xargs -0 sha256sum"
-                ),
+                ("find . -path './.git' -prune -o -type f -print0 | sort -z | xargs -0 sha256sum"),
             ]
         )
         return hashlib.sha256(result.stdout.encode()).hexdigest()
@@ -143,11 +184,9 @@ class DockerSandbox:
 
     @staticmethod
     def _run_host(
-        command: List[str], *, check: bool = True, timeout: float | None = None
+        command: list[str], *, check: bool = True, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            command, text=True, capture_output=True, check=check, timeout=timeout
-        )
+        return subprocess.run(command, text=True, capture_output=True, check=check, timeout=timeout)
 
 
 def _safe_relative(path: str) -> None:

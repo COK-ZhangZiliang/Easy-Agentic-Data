@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 import re
 import shutil
 import sqlite3
 import subprocess
 import tarfile
-import io
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any
 
 from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.scenarios import HiddenEvaluatorContext, Scenario, ScenarioInstance
@@ -25,7 +26,7 @@ class RegistryIssue:
 
 @dataclass
 class RegistryValidation:
-    issues: List[RegistryIssue] = field(default_factory=list)
+    issues: list[RegistryIssue] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -73,8 +74,12 @@ class ScenarioRegistry:
             connection.execute(
                 "INSERT OR REPLACE INTO seeds VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    seed.seed_id, seed.category, seed.difficulty, seed.split,
-                    seed.provenance, _normalized_query(seed.public.query),
+                    seed.seed_id,
+                    seed.category,
+                    seed.difficulty,
+                    seed.split,
+                    seed.provenance,
+                    _normalized_query(seed.public.query),
                 ),
             )
 
@@ -88,8 +93,11 @@ class ScenarioRegistry:
             connection.execute(
                 "INSERT OR REPLACE INTO environments VALUES (?, ?, ?, ?, ?)",
                 (
-                    environment.environment_id, environment.name, environment.version,
-                    environment.source_uri, environment.source_revision,
+                    environment.environment_id,
+                    environment.name,
+                    environment.version,
+                    environment.source_uri,
+                    environment.source_revision,
                 ),
             )
 
@@ -101,7 +109,8 @@ class ScenarioRegistry:
             connection.execute(
                 "INSERT OR REPLACE INTO scenarios VALUES (?, ?, ?)",
                 (
-                    scenario.scenario_id, scenario.query_seed.seed_id,
+                    scenario.scenario_id,
+                    scenario.query_seed.seed_id,
                     scenario.environment.environment_id,
                 ),
             )
@@ -109,7 +118,7 @@ class ScenarioRegistry:
     def get_scenario(self, scenario_id: str) -> Scenario:
         return Scenario.from_dict(_read_json(self.scenario_dir / f"{scenario_id}.json"))
 
-    def list_scenarios(self) -> List[Dict[str, str]]:
+    def list_scenarios(self) -> list[dict[str, str]]:
         self.initialize()
         with self._connect() as connection:
             rows = connection.execute(
@@ -122,7 +131,7 @@ class ScenarioRegistry:
         scenario_id: str,
         *,
         random_seed: int,
-        parameters: Dict[str, Any] | None = None,
+        parameters: dict[str, Any] | None = None,
         initial_state_hash: str = "",
     ) -> ScenarioInstance:
         return ScenarioInstance.materialize(
@@ -140,13 +149,13 @@ class ScenarioRegistry:
             self.add_scenario(Scenario.from_dict(_read_json(path)))
 
     def validate(self) -> RegistryValidation:
-        issues: List[RegistryIssue] = []
+        issues: list[RegistryIssue] = []
         seeds = [
             QuerySeed.from_dict(_read_json(path)) for path in sorted(self.seed_dir.glob("*.json"))
         ]
         seen_ids: set[str] = set()
-        query_splits: Dict[str, set[str]] = {}
-        provenance_splits: Dict[str, set[str]] = {}
+        query_splits: dict[str, set[str]] = {}
+        provenance_splits: dict[str, set[str]] = {}
         for seed in seeds:
             if seed.seed_id in seen_ids:
                 issues.append(RegistryIssue("duplicate_id", "Duplicate seed ID", seed.seed_id))
@@ -156,29 +165,43 @@ class ScenarioRegistry:
                 provenance_splits.setdefault(seed.provenance, set()).add(seed.split)
         for value, splits in query_splits.items():
             if "train" in splits and "evaluation" in splits:
-                issues.append(RegistryIssue("split_leakage", f"Query appears across splits: {value}"))
+                issues.append(
+                    RegistryIssue("split_leakage", f"Query appears across splits: {value}")
+                )
         for source, splits in provenance_splits.items():
             if "train" in splits and "evaluation" in splits:
-                issues.append(RegistryIssue("source_leakage", f"Source appears across splits: {source}"))
+                issues.append(
+                    RegistryIssue("source_leakage", f"Source appears across splits: {source}")
+                )
         for path in sorted(self.environment_dir.glob("*.json")):
             environment = EnvironmentSpec.from_dict(_read_json(path))
             if environment.image_digest and "@sha256:" not in environment.image_digest:
                 issues.append(
                     RegistryIssue(
-                        "mutable_image", "Environment image is not pinned by digest",
+                        "mutable_image",
+                        "Environment image is not pinned by digest",
                         environment.environment_id,
                     )
                 )
-            if environment.source_uri.startswith("file://") and not Path(
-                environment.source_uri[7:]
-            ).exists():
+            if (
+                environment.source_uri.startswith("file://")
+                and not Path(environment.source_uri[7:]).exists()
+            ):
                 issues.append(
-                    RegistryIssue("missing_source", "Environment source is missing", environment.environment_id)
+                    RegistryIssue(
+                        "missing_source",
+                        "Environment source is missing",
+                        environment.environment_id,
+                    )
                 )
             elif environment.source_uri.startswith("file://") and environment.source_revision:
                 completed = subprocess.run(
                     [
-                        "git", "-C", environment.source_uri[7:], "cat-file", "-e",
+                        "git",
+                        "-C",
+                        environment.source_uri[7:],
+                        "cat-file",
+                        "-e",
                         f"{environment.source_revision}^{{commit}}",
                     ],
                     capture_output=True,
@@ -209,7 +232,9 @@ def import_repository_environment(
     repository_path = Path(repository).resolve()
     completed = subprocess.run(
         ["git", "-C", str(repository_path), "rev-parse", f"{revision}^{{commit}}"],
-        text=True, capture_output=True, check=True,
+        text=True,
+        capture_output=True,
+        check=True,
     )
     commit = completed.stdout.strip()
     return EnvironmentSpec(
@@ -226,12 +251,15 @@ def materialize_environment_source(environment: EnvironmentSpec, destination: st
     if not environment.source_uri:
         return destination_path
     if not environment.source_uri.startswith("file://"):
-        raise ValueError(f"Unsupported source URI for local materialization: {environment.source_uri}")
+        raise ValueError(
+            f"Unsupported source URI for local materialization: {environment.source_uri}"
+        )
     repository = Path(environment.source_uri[7:])
     if environment.source_revision:
         archive = subprocess.run(
             ["git", "-C", str(repository), "archive", environment.source_revision],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         ).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
             members = bundle.getmembers()
@@ -294,19 +322,19 @@ def issue_commit_scenario(
     )
 
 
-def exact_duplicate_groups(seeds: Iterable[QuerySeed]) -> List[List[str]]:
-    groups: Dict[str, List[str]] = {}
+def exact_duplicate_groups(seeds: Iterable[QuerySeed]) -> list[list[str]]:
+    groups: dict[str, list[str]] = {}
     for seed in seeds:
         groups.setdefault(_normalized_query(seed.public.query), []).append(seed.seed_id)
     return [ids for ids in groups.values() if len(ids) > 1]
 
 
-def semantic_duplicate_candidates(seeds: Iterable[QuerySeed]) -> List[tuple[str, str]]:
+def semantic_duplicate_candidates(seeds: Iterable[QuerySeed]) -> list[tuple[str, str]]:
     items = list(seeds)
     pairs = []
     for index, left in enumerate(items):
         left_tokens = set(_semantic_tokens(left.public.query))
-        for right in items[index + 1:]:
+        for right in items[index + 1 :]:
             right_tokens = set(_semantic_tokens(right.public.query))
             union = left_tokens | right_tokens
             if union and len(left_tokens & right_tokens) / len(union) >= 0.8:
@@ -314,11 +342,11 @@ def semantic_duplicate_candidates(seeds: Iterable[QuerySeed]) -> List[tuple[str,
     return pairs
 
 
-def _tokens(value: str) -> List[str]:
+def _tokens(value: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", value.lower())
 
 
-def _semantic_tokens(value: str) -> List[str]:
+def _semantic_tokens(value: str) -> list[str]:
     return [token for token in _tokens(value) if not token.isdigit()]
 
 
@@ -331,5 +359,5 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
+def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))

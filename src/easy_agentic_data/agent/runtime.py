@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
 
 from easy_agentic_data.coding_tools import CodingToolRuntime
 from easy_agentic_data.llm.base import LLMClient
@@ -39,8 +39,15 @@ class HeadlessAgent:
         *,
         budgets: AgentBudgets | None = None,
         system_prompt: str = (
-            "You are a headless coding agent. Inspect the workspace, use tools carefully, "
-            "run relevant tests, and report the completed work."
+            "You are a headless coding agent operating inside a restricted workspace.\n\n"
+            "Follow this protocol:\n"
+            "1. Inspect relevant files and repository state before editing.\n"
+            "2. Make the smallest change that fully satisfies the user request.\n"
+            "3. Use only available tools and paths inside the workspace. Never invent results.\n"
+            "4. After editing, run the narrowest relevant validation, then inspect the diff.\n"
+            "5. If a tool fails, diagnose the error and retry with a corrected action.\n"
+            "6. Ask the user only when required information cannot be discovered safely.\n"
+            "7. Finish with a concise summary of changes and validation actually performed."
         ),
     ) -> None:
         self.client = client
@@ -53,7 +60,7 @@ class HeadlessAgent:
         instance: ScenarioInstance,
         recorder: TraceRecorder,
         *,
-        ask_user: Optional[Callable[[str], str | None]] = None,
+        ask_user: Callable[[str], str | None] | None = None,
         finalize: bool = True,
     ) -> AgentRunResult:
         started = time.monotonic()
@@ -178,7 +185,11 @@ class HeadlessAgent:
                         EventType.USER_MESSAGE,
                         {"message_id": f"user_{turn + 1}", "content": answer},
                     )
-                    messages.append(Message("tool", json.dumps({"answer": answer}), name=name, tool_call_id=call_id))
+                    messages.append(
+                        Message(
+                            "tool", json.dumps({"answer": answer}), name=name, tool_call_id=call_id
+                        )
+                    )
                     messages.append(Message("user", answer))
                 else:
                     messages.append(
@@ -213,4 +224,11 @@ class HeadlessAgent:
                     "success": False,
                 },
             )
-        return AgentRunResult(reason, final_answer, min(turn + 1, self.budgets.max_turns), tool_calls, tokens, final_hash)
+        return AgentRunResult(
+            reason,
+            final_answer,
+            min(turn + 1, self.budgets.max_turns),
+            tool_calls,
+            tokens,
+            final_hash,
+        )

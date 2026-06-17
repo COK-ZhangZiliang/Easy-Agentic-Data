@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
-from typing import Dict, List
-
 
 _SECRET_PATTERNS = {
     "openai_key": re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
@@ -14,7 +12,7 @@ _SECRET_PATTERNS = {
 }
 
 
-def sensitive_findings(text: str) -> List[Dict[str, str]]:
+def sensitive_findings(text: str) -> list[dict[str, str]]:
     findings = []
     for kind, pattern in _SECRET_PATTERNS.items():
         for match in pattern.finditer(text):
@@ -22,7 +20,9 @@ def sensitive_findings(text: str) -> List[Dict[str, str]]:
     return findings
 
 
-def purge_expired_artifacts(root: str | Path, *, retention_seconds: float, now: float | None = None) -> List[str]:
+def purge_expired_artifacts(
+    root: str | Path, *, retention_seconds: float, now: float | None = None
+) -> list[str]:
     root_path = Path(root).resolve()
     cutoff = (time.time() if now is None else now) - retention_seconds
     removed = []

@@ -1,6 +1,8 @@
 import json
 import os
 import unittest
+import urllib.error
+from io import BytesIO
 from unittest.mock import patch
 
 from easy_agentic_data.config import LLMConfig
@@ -79,6 +81,111 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request_body["tools"], tools)
         self.assertNotIn("Authorization", request.headers)
 
+    def test_provider_body_structured_output_and_reasoning_are_preserved(self) -> None:
+        config = LLMConfig(
+            provider="local_openai_compatible",
+            request_body={"thinking": {"type": "disabled"}, "user_id": "test-run"},
+        )
+        client = LocalOpenAICompatibleClient(config)
+        fake_response = _FakeHTTPResponse(
+            {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "Need a tool.",
+                            "tool_calls": [],
+                        }
+                    }
+                ],
+            }
+        )
+
+        with patch(
+            "easy_agentic_data.llm.openai_compatible.urllib.request.urlopen",
+            return_value=fake_response,
+        ) as urlopen:
+            response = client.complete(
+                [Message("user", "Return json.")],
+                response_format={"type": "json_object"},
+            )
+
+        request_body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(request_body["thinking"], {"type": "disabled"})
+        self.assertEqual(request_body["user_id"], "test-run")
+        self.assertEqual(request_body["response_format"], {"type": "json_object"})
+        self.assertEqual(response.message.reasoning_content, "Need a tool.")
+        self.assertNotIn("reasoning_content", response.message.to_api_dict())
+        self.assertEqual(
+            response.message.to_api_dict(include_reasoning_content=True)["reasoning_content"],
+            "Need a tool.",
+        )
+
+    def test_reasoning_context_is_sent_back_to_provider(self) -> None:
+        config = LLMConfig(provider="local_openai_compatible")
+        client = LocalOpenAICompatibleClient(config)
+        fake_response = _FakeHTTPResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+        )
+
+        with patch(
+            "easy_agentic_data.llm.openai_compatible.urllib.request.urlopen",
+            return_value=fake_response,
+        ) as urlopen:
+            client.complete(
+                [Message("assistant", tool_calls=[], reasoning_content="private context")]
+            )
+
+        request_body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(
+            request_body["messages"][0]["reasoning_content"],
+            "private context",
+        )
+
+    def test_retryable_http_error_is_retried(self) -> None:
+        config = LLMConfig(
+            provider="local_openai_compatible",
+            max_retries=1,
+            retry_backoff_seconds=0,
+        )
+        client = LocalOpenAICompatibleClient(config)
+        error = urllib.error.HTTPError(
+            "https://example.test",
+            429,
+            "rate limited",
+            {},
+            BytesIO(b'{"error":"slow down"}'),
+        )
+        success = _FakeHTTPResponse(
+            {
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {},
+            }
+        )
+
+        with patch(
+            "easy_agentic_data.llm.openai_compatible.urllib.request.urlopen",
+            side_effect=[error, success],
+        ) as urlopen:
+            response = client.complete([Message("user", "Hello")])
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(response.retry_count, 1)
+
+    def test_invalid_response_fails_with_context(self) -> None:
+        config = LLMConfig(provider="local_openai_compatible")
+        client = LocalOpenAICompatibleClient(config)
+        fake_response = _FakeHTTPResponse({"choices": []})
+
+        with patch(
+            "easy_agentic_data.llm.openai_compatible.urllib.request.urlopen",
+            return_value=fake_response,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing choices"):
+                client.complete([Message("user", "Hello")])
+
     def test_local_client_uses_optional_api_key(self) -> None:
         config = LLMConfig(
             provider="local_openai_compatible",
@@ -93,6 +200,10 @@ class LLMClientTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ValueError, "EAD_TEST_MISSING_API_KEY"):
                 OpenAICompatibleClient(config)
+
+    def test_request_body_cannot_override_protocol_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved fields"):
+            LLMConfig(request_body={"model": "other"})
 
 
 if __name__ == "__main__":

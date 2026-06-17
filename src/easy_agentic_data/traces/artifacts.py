@@ -5,7 +5,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -16,11 +16,11 @@ class ArtifactReference:
     media_type: str
     relative_path: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "ArtifactReference":
+    def from_dict(cls, value: dict[str, Any]) -> ArtifactReference:
         return cls(**value)
 
 
@@ -81,4 +81,3 @@ class LocalArtifactStore:
 
     def read_text(self, reference: ArtifactReference) -> str:
         return self.read_bytes(reference).decode("utf-8")
-

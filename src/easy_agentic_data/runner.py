@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
-from typing import List
 
 from easy_agentic_data.llm.base import LLMClient
 from easy_agentic_data.models import Message, Task, ToolEvent, Trajectory
 from easy_agentic_data.tools import ToolRegistry
 
-
 AGENT_SYSTEM_PROMPT = """\
-You are an agent solving a training task. Use tools when they improve correctness. Respect every
-constraint, inspect tool errors, and finish with a concise answer grounded in observed results.
+You are a tool-using agent completing an evaluated task.
+
+Execution protocol:
+1. Read the full instruction and identify every explicit constraint.
+2. Use available tools whenever they provide objective evidence or are required by the task.
+3. Treat tool outputs and errors as authoritative. Correct mistakes instead of guessing.
+4. Do not claim a tool was used or a result was verified unless it appears in the conversation.
+5. Stop calling tools once the task is complete.
+6. Give a concise final answer that includes the requested result and evidence needed by the
+   constraints. Do not describe hidden reasoning.
 """
 
 
@@ -21,11 +27,11 @@ class AgentRunner:
         self.max_turns = max_turns
 
     def run(self, task: Task, rollout_index: int = 0) -> Trajectory:
-        messages: List[Message] = [
+        messages: list[Message] = [
             Message("system", AGENT_SYSTEM_PROMPT),
             Message("user", task.instruction),
         ]
-        events: List[ToolEvent] = []
+        events: list[ToolEvent] = []
 
         try:
             for turn in range(self.max_turns):
@@ -85,7 +91,9 @@ class AgentRunner:
         name = function.get("name", "")
         raw_arguments = function.get("arguments", "{}")
         try:
-            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            arguments = (
+                json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            )
             if not isinstance(arguments, dict):
                 raise ValueError("Tool arguments must be a JSON object")
         except (json.JSONDecodeError, ValueError) as exc:
@@ -96,4 +104,3 @@ class AgentRunner:
                 error=f"Invalid tool arguments: {exc}",
             )
         return self.tools.execute(call.get("id", "unknown"), name, arguments)
-

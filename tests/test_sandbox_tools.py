@@ -8,6 +8,24 @@ from easy_agentic_data.sandbox.docker import _bounded
 
 
 class SandboxToolTests(unittest.TestCase):
+    def test_only_policy_allowed_tools_are_exposed_to_model(self) -> None:
+        sandbox = MemorySandbox({"app.py": "value = 1\n"})
+        sandbox.create()
+        runtime = CodingToolRuntime(
+            sandbox,
+            ToolPolicy(["read_file", "run_command"]),
+        )
+
+        schemas = runtime.schemas()
+
+        names = [schema["function"]["name"] for schema in schemas]
+        self.assertEqual(names, ["read_file", "run_command"])
+        command = next(schema for schema in schemas if schema["function"]["name"] == "run_command")
+        self.assertEqual(
+            command["function"]["parameters"]["properties"]["command"]["items"],
+            {"type": "string"},
+        )
+
     def setUp(self) -> None:
         self.sandbox = MemorySandbox(
             {"app.py": "def value():\n    return 1\n"},
@@ -18,8 +36,14 @@ class SandboxToolTests(unittest.TestCase):
             self.sandbox,
             ToolPolicy(
                 [
-                    "list_files", "read_file", "search_files", "apply_patch",
-                    "run_command", "git_status", "git_diff", "ask_user",
+                    "list_files",
+                    "read_file",
+                    "search_files",
+                    "apply_patch",
+                    "run_command",
+                    "git_status",
+                    "git_diff",
+                    "ask_user",
                 ]
             ),
         )
@@ -37,23 +61,17 @@ class SandboxToolTests(unittest.TestCase):
         self.assertEqual(self.sandbox.state_hash(), initial)
 
     def test_policy_denies_network_and_path_escape(self) -> None:
-        network = self.runtime.execute(
-            "run_command", {"command": ["curl", "https://example.com"]}
-        )
+        network = self.runtime.execute("run_command", {"command": ["curl", "https://example.com"]})
         escaped = self.runtime.execute("read_file", {"path": "../secret"})
         self.assertIn("Network access is disabled", network.error or "")
         self.assertIn("forbidden host path", escaped.error or "")
 
     def test_adversarial_arguments_and_oversized_output_are_contained(self) -> None:
-        socket = self.runtime.execute(
-            "read_file", {"path": "/var/run/docker.sock"}
-        )
+        socket = self.runtime.execute("read_file", {"path": "/var/run/docker.sock"})
         expansion = self.runtime.execute(
             "run_command", {"command": ["sh", "-lc", "cat /etc/passwd"]}
         )
-        traversal = self.runtime.execute(
-            "read_file", {"path": "link/../../secret"}
-        )
+        traversal = self.runtime.execute("read_file", {"path": "link/../../secret"})
         bounded, truncated = _bounded("x" * 100, 10)
         self.assertIn("forbidden host path", socket.error or "")
         self.assertIn("forbidden host path", expansion.error or "")
@@ -78,8 +96,9 @@ class SandboxToolTests(unittest.TestCase):
             calls.append(command)
             return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("shutil.which", return_value="/usr/bin/docker"), patch.object(
-            sandbox, "_run_host", side_effect=capture
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(sandbox, "_run_host", side_effect=capture),
         ):
             sandbox.create()
         create = next(call for call in calls if call[:2] == ["docker", "create"])

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
 from easy_agentic_data.models import stable_id
 
@@ -18,14 +18,14 @@ class EnvironmentSpec:
     source_revision: str = ""
     fixture_patch: str = ""
     working_directory: str = "/workspace"
-    setup_commands: List[str] = field(default_factory=list)
-    capability_packs: List[str] = field(default_factory=list)
+    setup_commands: list[str] = field(default_factory=list)
+    capability_packs: list[str] = field(default_factory=list)
     network_policy: str = "disabled"
-    resource_limits: Dict[str, Any] = field(default_factory=dict)
-    health_check: List[str] = field(default_factory=list)
+    resource_limits: dict[str, Any] = field(default_factory=dict)
+    health_check: list[str] = field(default_factory=list)
     reset_strategy: str = "recreate"
-    evaluator_refs: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    evaluator_refs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
     environment_id: str = ""
 
     def __post_init__(self) -> None:
@@ -35,15 +35,15 @@ class EnvironmentSpec:
             content.pop("environment_id", None)
             self.environment_id = stable_id("env", content)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "EnvironmentSpec":
+    def from_dict(cls, value: dict[str, Any]) -> EnvironmentSpec:
         return cls(**value)
 
 
-def _reject_secret_metadata(metadata: Dict[str, Any]) -> None:
+def _reject_secret_metadata(metadata: dict[str, Any]) -> None:
     forbidden = {"api_key", "apikey", "password", "secret", "token", "credential"}
     for key in metadata:
         normalized = key.lower().replace("-", "_")

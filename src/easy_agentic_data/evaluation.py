@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import hashlib
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Protocol
+from typing import Any, Protocol
 
 from easy_agentic_data.sandbox import Sandbox
 from easy_agentic_data.scenarios import ScenarioInstance
@@ -16,20 +17,32 @@ class EvaluationEvidence:
     passed: bool
     score: float
     reason: str
-    evidence: Dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
     infrastructure_failure: bool = False
+
+
+@dataclass(frozen=True)
+class TurnRewardEvidence:
+    turn_index: int
+    event_id: str
+    kind: str
+    action_type: str
+    reward: float
+    reason: str
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class EvaluationReport:
     scenario_instance_id: str
-    results: List[EvaluationEvidence]
+    results: list[EvaluationEvidence]
     success: bool
     reward: int
     infrastructure_failure: bool
-    metrics: Dict[str, float]
+    metrics: dict[str, float]
+    turn_rewards: list[TurnRewardEvidence] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -42,7 +55,7 @@ class DeterministicEvaluator(Protocol):
 class HiddenCommandEvaluator:
     name = "hidden_command"
 
-    def __init__(self, command: List[str]) -> None:
+    def __init__(self, command: list[str]) -> None:
         self.command = command
 
     def evaluate(self, sandbox: Sandbox, instance: ScenarioInstance) -> EvaluationEvidence:
@@ -58,7 +71,10 @@ class HiddenCommandEvaluator:
             )
         except Exception as exc:
             return EvaluationEvidence(
-                self.name, False, 0.0, f"Evaluator infrastructure failure: {exc}",
+                self.name,
+                False,
+                0.0,
+                f"Evaluator infrastructure failure: {exc}",
                 infrastructure_failure=True,
             )
 
@@ -84,8 +100,12 @@ class RequiredStateEvaluator:
             if fragment not in actual:
                 failures.append(path)
         return EvaluationEvidence(
-            self.name, not failures, 1.0 if not failures else 0.0,
-            "Required state reached" if not failures else f"Required state missing: {sorted(set(failures))}",
+            self.name,
+            not failures,
+            1.0 if not failures else 0.0,
+            "Required state reached"
+            if not failures
+            else f"Required state missing: {sorted(set(failures))}",
         )
 
 
@@ -94,7 +114,9 @@ class ForbiddenStateEvaluator:
 
     def evaluate(self, sandbox: Sandbox, instance: ScenarioInstance) -> EvaluationEvidence:
         violations = []
-        for path, expected in instance.hidden_evaluator.forbidden_state.get("file_equals", {}).items():
+        for path, expected in instance.hidden_evaluator.forbidden_state.get(
+            "file_equals", {}
+        ).items():
             try:
                 actual = sandbox.read(path)
             except Exception:
@@ -102,7 +124,9 @@ class ForbiddenStateEvaluator:
             if actual != expected:
                 violations.append(path)
         return EvaluationEvidence(
-            self.name, not violations, 1.0 if not violations else 0.0,
+            self.name,
+            not violations,
+            1.0 if not violations else 0.0,
             "No forbidden state changes" if not violations else f"Forbidden changes: {violations}",
         )
 
@@ -116,18 +140,27 @@ class EvaluationSuite:
         sandbox: Sandbox,
         instance: ScenarioInstance,
         *,
-        diagnostics: Dict[str, float] | None = None,
+        diagnostics: dict[str, float] | None = None,
+        turn_rewards: Iterable[TurnRewardEvidence] | None = None,
     ) -> EvaluationReport:
+        turn_reward_items = list(turn_rewards or [])
+        metrics = dict(diagnostics or {})
+        metrics.update(turn_reward_metrics(turn_reward_items))
         results = [evaluator.evaluate(sandbox, instance) for evaluator in self.evaluators]
         infrastructure_failure = any(result.infrastructure_failure for result in results)
-        success = bool(results) and all(result.passed for result in results) and not infrastructure_failure
+        success = (
+            bool(results)
+            and all(result.passed for result in results)
+            and not infrastructure_failure
+        )
         return EvaluationReport(
             instance.instance_id,
             results,
             success,
             1 if success else 0,
             infrastructure_failure,
-            diagnostics or {},
+            metrics,
+            turn_reward_items,
         )
 
 
@@ -165,17 +198,21 @@ def finalize_evaluation_trace(
     )
 
 
-def contamination_findings(trace_path: str | Path, instance: ScenarioInstance) -> List[str]:
+def contamination_findings(trace_path: str | Path, instance: ScenarioInstance) -> list[str]:
     content = Path(trace_path).read_text(encoding="utf-8")
     candidates = (
         instance.hidden_evaluator.hidden_tests
         + instance.hidden_evaluator.reference_artifacts
-        + ([instance.hidden_evaluator.reference_answer] if instance.hidden_evaluator.reference_answer else [])
+        + (
+            [instance.hidden_evaluator.reference_answer]
+            if instance.hidden_evaluator.reference_answer
+            else []
+        )
     )
     return [value for value in candidates if value and value in content]
 
 
-def pass_at_k(rewards: Iterable[int]) -> Dict[str, float]:
+def pass_at_k(rewards: Iterable[int]) -> dict[str, float]:
     values = list(rewards)
     successes = sum(1 for value in values if value > 0)
     return {
@@ -183,6 +220,87 @@ def pass_at_k(rewards: Iterable[int]) -> Dict[str, float]:
         "successes": float(successes),
         "pass_at_k": 1.0 if successes else 0.0,
         "success_rate": successes / len(values) if values else 0.0,
+    }
+
+
+def derive_turn_rewards(
+    trace: Trace,
+    instance: ScenarioInstance | None = None,
+) -> list[TurnRewardEvidence]:
+    rewards: list[TurnRewardEvidence] = []
+    turn_index = -1
+    requested_tools: dict[str, str] = {}
+    requested_arguments: dict[str, dict[str, Any]] = {}
+    for event in trace.events:
+        payload = event.payload
+        if event.event_type is EventType.MODEL_RESPONSE:
+            turn_index += 1
+        elif event.event_type is EventType.TOOL_REQUESTED:
+            call_id = payload["call_id"]
+            name = payload["name"]
+            arguments = payload.get("arguments", {})
+            requested_tools[call_id] = name
+            requested_arguments[call_id] = arguments if isinstance(arguments, dict) else {}
+            if name == "ask_user":
+                reward = _ask_user_reward(
+                    str(requested_arguments[call_id].get("question", "")),
+                    instance,
+                )
+                rewards.append(
+                    TurnRewardEvidence(
+                        turn_index=max(turn_index, 0),
+                        event_id=event.event_id,
+                        kind="information_gathering",
+                        action_type="ask_user",
+                        reward=reward,
+                        reason=(
+                            "Asked for relevant hidden user information"
+                            if reward > 0
+                            else "Asked the simulated user for information"
+                        ),
+                        evidence={"call_id": call_id, "tool": name},
+                    )
+                )
+        elif event.event_type is EventType.POLICY_DECISION:
+            if payload["decision"] != "allow":
+                rewards.append(
+                    TurnRewardEvidence(
+                        turn_index=max(turn_index, 0),
+                        event_id=event.event_id,
+                        kind="policy",
+                        action_type=requested_tools.get(payload["call_id"], "tool_call"),
+                        reward=-1.0,
+                        reason="Tool action was denied by policy",
+                        evidence={"call_id": payload["call_id"], "decision": payload["decision"]},
+                    )
+                )
+        elif event.event_type is EventType.TOOL_FINISHED:
+            call_id = payload["call_id"]
+            action_type = requested_tools.get(call_id, "tool_call")
+            status = payload["status"]
+            rewards.append(
+                TurnRewardEvidence(
+                    turn_index=max(turn_index, 0),
+                    event_id=event.event_id,
+                    kind="tool_execution",
+                    action_type=action_type,
+                    reward=0.1 if status == "completed" else -0.1,
+                    reason="Tool execution completed" if status == "completed" else "Tool failed",
+                    evidence={"call_id": call_id, "tool": action_type, "status": status},
+                )
+            )
+    return rewards
+
+
+def turn_reward_metrics(turn_rewards: Iterable[TurnRewardEvidence]) -> dict[str, float]:
+    rewards = [item.reward for item in turn_rewards]
+    positives = sum(1 for value in rewards if value > 0)
+    negatives = sum(1 for value in rewards if value < 0)
+    return {
+        "turn_reward_total": sum(rewards),
+        "turn_reward_mean": sum(rewards) / len(rewards) if rewards else 0.0,
+        "positive_turn_rewards": float(positives),
+        "negative_turn_rewards": float(negatives),
     }
 
 
@@ -202,7 +320,7 @@ def trace_policy_evidence(trace: Trace) -> EvaluationEvidence:
     )
 
 
-def workspace_summary(sandbox: Sandbox) -> Dict[str, Any]:
+def workspace_summary(sandbox: Sandbox) -> dict[str, Any]:
     hashes = {}
     for path in sandbox.list_files():
         try:
@@ -216,7 +334,7 @@ def workspace_summary(sandbox: Sandbox) -> Dict[str, Any]:
     }
 
 
-def rank_reports(reports: Iterable[EvaluationReport]) -> List[EvaluationReport]:
+def rank_reports(reports: Iterable[EvaluationReport]) -> list[EvaluationReport]:
     """Rank by deterministic reward, then by diagnostic efficiency only."""
 
     return sorted(
@@ -231,3 +349,14 @@ def rank_reports(reports: Iterable[EvaluationReport]) -> List[EvaluationReport]:
         ),
         reverse=True,
     )
+
+
+def _ask_user_reward(question: str, instance: ScenarioInstance | None) -> float:
+    if instance is None:
+        return 0.2
+    known_facts = instance.hidden_user.known_facts
+    lowered = question.lower()
+    for key in known_facts:
+        if key.lower() in lowered or key.lower().replace("_", " ") in lowered:
+            return 0.2
+    return 0.0

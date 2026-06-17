@@ -11,9 +11,11 @@ from easy_agentic_data.evaluation import (
     HiddenCommandEvaluator,
     RequiredStateEvaluator,
     contamination_findings,
+    derive_turn_rewards,
     finalize_evaluation_trace,
     pass_at_k,
     rank_reports,
+    turn_reward_metrics,
     trace_policy_evidence,
     workspace_summary,
 )
@@ -37,12 +39,17 @@ class EvaluationExportTests(unittest.TestCase):
         instance = _instance(sandbox.state_hash())
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "success.jsonl"
-            with TraceRecorder(path, session_id="session_success", scenario_instance=instance) as recorder:
+            with TraceRecorder(
+                path, session_id="session_success", scenario_instance=instance
+            ) as recorder:
                 HeadlessAgent(_PatchClient(), _tools(sandbox)).run(
                     instance, recorder, finalize=False
                 )
                 report = EvaluationSuite(
-                    [HiddenCommandEvaluator(["python", "-m", "hidden_test"]), RequiredStateEvaluator()]
+                    [
+                        HiddenCommandEvaluator(["python", "-m", "hidden_test"]),
+                        RequiredStateEvaluator(),
+                    ]
                 ).evaluate(sandbox, instance, diagnostics={"turns": 3, "tokens": 30})
                 finalize_evaluation_trace(recorder, report, final_state_hash=sandbox.state_hash())
             trace = load_trace(path)
@@ -53,15 +60,56 @@ class EvaluationExportTests(unittest.TestCase):
             self.assertTrue(trace_policy_evidence(trace).passed)
             self.assertEqual(workspace_summary(sandbox)["state_hash"], sandbox.state_hash())
             self.assertEqual(trace_to_sft(trace, report)["trace_id"], trace.trace_id)
-            self.assertEqual(trace_to_rl_episode(trace, report)["steps"][-1]["reward"], 1)
+            episode = trace_to_rl_episode(trace, report)
+            self.assertEqual(episode["schema"], "easy_agentic_data.rl_episode.v1")
+            self.assertEqual(episode["steps"][-1]["reward"], 1)
+            self.assertEqual(episode["steps"][0]["loss_mask"], 0)
+            self.assertEqual(episode["steps"][-1]["action_type"], "answer")
             self.assertTrue(analysis_record(trace, report)["success"])
+
+    def test_turn_rewards_attach_to_rl_episode_actions(self) -> None:
+        sandbox = _sandbox()
+        instance = _instance(sandbox.state_hash())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "turn_rewards.jsonl"
+            with TraceRecorder(
+                path, session_id="turn_rewards", scenario_instance=instance
+            ) as recorder:
+                HeadlessAgent(_PatchClient(), _tools(sandbox)).run(
+                    instance, recorder, finalize=False
+                )
+                partial_trace = load_trace(path)
+                turn_rewards = derive_turn_rewards(partial_trace, instance)
+                report = EvaluationSuite([RequiredStateEvaluator()]).evaluate(
+                    sandbox,
+                    instance,
+                    turn_rewards=turn_rewards,
+                )
+                finalize_evaluation_trace(recorder, report, final_state_hash=sandbox.state_hash())
+            trace = load_trace(path)
+            episode = trace_to_rl_episode(trace, report)
+
+        self.assertGreater(turn_reward_metrics(turn_rewards)["turn_reward_total"], 0.0)
+        self.assertGreater(report.metrics["positive_turn_rewards"], 0)
+        self.assertTrue(
+            any(step.get("reward_kind") == "tool_execution" for step in episode["steps"])
+        )
+        self.assertTrue(
+            all(
+                step["loss_mask"] == 0
+                for step in episode["steps"]
+                if step["role"] != "assistant"
+            )
+        )
 
     def test_preference_requires_positive_deterministic_margin(self) -> None:
         successful_sandbox = _sandbox()
         instance = _instance(successful_sandbox.state_hash())
         with tempfile.TemporaryDirectory() as directory:
             chosen_path = Path(directory) / "chosen.jsonl"
-            with TraceRecorder(chosen_path, session_id="chosen", scenario_instance=instance) as recorder:
+            with TraceRecorder(
+                chosen_path, session_id="chosen", scenario_instance=instance
+            ) as recorder:
                 HeadlessAgent(_PatchClient(), _tools(successful_sandbox)).run(
                     instance, recorder, finalize=False
                 )
@@ -74,7 +122,9 @@ class EvaluationExportTests(unittest.TestCase):
 
             failed_sandbox = _sandbox()
             failed_path = Path(directory) / "failed.jsonl"
-            with TraceRecorder(failed_path, session_id="failed", scenario_instance=instance) as recorder:
+            with TraceRecorder(
+                failed_path, session_id="failed", scenario_instance=instance
+            ) as recorder:
                 recorder.start(instance)
                 failed_report = EvaluationSuite([RequiredStateEvaluator()]).evaluate(
                     failed_sandbox, instance
@@ -124,7 +174,9 @@ class _PatchClient:
     def complete(self, messages, tools=None, **kwargs):
         del messages, tools, kwargs
         script = [
-            _call("patch", "apply_patch", {"path": "app.py", "old": "value = 1", "new": "value = 2"}),
+            _call(
+                "patch", "apply_patch", {"path": "app.py", "old": "value = 1", "new": "value = 2"}
+            ),
             _call("test", "run_command", {"command": ["python", "-m", "visible_test"]}),
             Message("assistant", "Done."),
         ]
@@ -176,9 +228,7 @@ def _instance(initial_hash):
             forbidden_state={"file_equals": {"protected.txt": "keep\n"}},
         ),
     )
-    return ScenarioInstance.materialize(
-        scenario, random_seed=2, initial_state_hash=initial_hash
-    )
+    return ScenarioInstance.materialize(scenario, random_seed=2, initial_state_hash=initial_hash)
 
 
 if __name__ == "__main__":

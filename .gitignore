@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
@@ -9,4 +10,4 @@ venv/
 dist/
 build/
 runs/
-
+REVIEW.md

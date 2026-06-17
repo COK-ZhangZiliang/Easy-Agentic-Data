@@ -9,7 +9,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-47%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-63%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) · [Local Models](#local-llm-api) ·
@@ -162,6 +162,30 @@ export OPENAI_API_KEY=...
 ead run --config examples/openai-compatible.json
 ```
 
+### DeepSeek V4 Flash
+
+The repository includes a configuration for DeepSeek's OpenAI-compatible API. It disables
+thinking mode for routine structured generation and tool loops, reducing token use and avoiding
+provider-specific reasoning context when it is not needed:
+
+```bash
+export DEEPSEEK_API_KEY=...
+ead run --config examples/deepseek-v4-flash.json
+```
+
+If a managed network uses a private certificate authority, point `SSL_CERT_FILE` at an approved CA
+bundle. TLS verification remains enabled:
+
+```bash
+export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
+```
+
+DeepSeek thinking mode is supported by the client when enabled through `llm.request_body`.
+Assistant `reasoning_content` is sent back only during the active provider conversation because
+DeepSeek requires it for continued reasoning. It is excluded from canonical trajectories and
+training exports. Keep thinking disabled unless a scenario benefits from it. See the
+[DeepSeek API documentation](https://api-docs.deepseek.com/) for current model and protocol details.
+
 ## Sandboxed Agent Runs
 
 Agent and batch runs use rootless Docker. A scenario binds the agent query to an immutable
@@ -197,6 +221,14 @@ EAD_RUN_DOCKER_TESTS=1 PYTHONPATH=src \
 ```
 
 `MemorySandbox` is used by unit tests for speed. It is not a production security boundary.
+
+Paid live-provider tests are opt-in and never run by default:
+
+```bash
+EAD_RUN_LIVE_LLM_TESTS=1 EAD_RUN_DOCKER_TESTS=1 \
+DEEPSEEK_API_KEY=... PYTHONPATH=src \
+  python3 -m unittest tests.test_live_llm_integration -v
+```
 
 ## Batch Synthesis
 
@@ -261,6 +293,7 @@ src/easy_agentic_data/
 - [Development contract](AGENTS.md): engineering, testing, documentation, and Git rules
 - [Trace schema](docs/trace-schema.md): event contracts and migration policy
 - [Sandbox ADR](docs/adr-0001-docker-sandbox.md): Docker isolation decision
+- [RL episode ADR](docs/adr-0002-rl-episode-export.md): action/loss-mask export contract
 - [Threat model](docs/threat-model.md): trust boundaries, risks, and controls
 
 ## Development Status

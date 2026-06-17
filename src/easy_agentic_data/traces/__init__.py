@@ -15,4 +15,3 @@ __all__ = [
     "load_trace",
     "replay_trace",
 ]
-
