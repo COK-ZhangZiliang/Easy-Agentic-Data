@@ -66,7 +66,7 @@ class OpenAICompatibleClient:
         message = Message(
             role=choice.get("role", "assistant"),
             content=choice.get("content"),
-            tool_calls=choice.get("tool_calls", []),
+            tool_calls=choice.get("tool_calls") or [],
             reasoning_content=choice.get("reasoning_content"),
         )
         return LLMResponse(
