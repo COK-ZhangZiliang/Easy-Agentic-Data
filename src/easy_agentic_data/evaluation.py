@@ -164,11 +164,45 @@ class EvaluationSuite:
         )
 
 
+def apply_agent_termination(
+    report: EvaluationReport,
+    termination_reason: TerminationReason,
+) -> EvaluationReport:
+    """Fail the outcome if the agent stopped for a budget, policy, or infrastructure reason."""
+
+    passed = termination_reason in {TerminationReason.AGENT_STOP, TerminationReason.SUCCESS}
+    evidence = EvaluationEvidence(
+        "agent_termination",
+        passed,
+        1.0 if passed else 0.0,
+        (
+            "Agent completed normally"
+            if passed
+            else f"Agent terminated before completion: {termination_reason.value}"
+        ),
+        {"termination_reason": termination_reason.value},
+        infrastructure_failure=termination_reason is TerminationReason.INFRASTRUCTURE_FAILURE,
+    )
+    results = [*report.results, evidence]
+    infrastructure_failure = report.infrastructure_failure or evidence.infrastructure_failure
+    success = report.success and evidence.passed and not infrastructure_failure
+    return EvaluationReport(
+        report.scenario_instance_id,
+        results,
+        success,
+        1 if success else 0,
+        infrastructure_failure,
+        report.metrics,
+        report.turn_rewards,
+    )
+
+
 def finalize_evaluation_trace(
     recorder: TraceRecorder,
     report: EvaluationReport,
     *,
     final_state_hash: str,
+    termination_reason: TerminationReason | None = None,
 ) -> None:
     for result in report.results:
         recorder.record(
@@ -188,6 +222,8 @@ def finalize_evaluation_trace(
             "termination_reason": (
                 TerminationReason.INFRASTRUCTURE_FAILURE.value
                 if report.infrastructure_failure
+                else termination_reason.value
+                if termination_reason is not None and not report.success
                 else TerminationReason.SUCCESS.value
                 if report.success
                 else TerminationReason.AGENT_STOP.value

@@ -10,13 +10,14 @@ from easy_agentic_data.evaluation import (
     EvaluationSuite,
     HiddenCommandEvaluator,
     RequiredStateEvaluator,
+    apply_agent_termination,
     contamination_findings,
     derive_turn_rewards,
     finalize_evaluation_trace,
     pass_at_k,
     rank_reports,
-    turn_reward_metrics,
     trace_policy_evidence,
+    turn_reward_metrics,
     workspace_summary,
 )
 from easy_agentic_data.models import LLMResponse, Message
@@ -31,6 +32,7 @@ from easy_agentic_data.trace_exporters import (
     traces_to_preference,
 )
 from easy_agentic_data.traces import TraceRecorder, load_trace
+from easy_agentic_data.traces.events import TerminationReason
 
 
 class EvaluationExportTests(unittest.TestCase):
@@ -59,12 +61,20 @@ class EvaluationExportTests(unittest.TestCase):
             self.assertFalse(contamination_findings(path, instance))
             self.assertTrue(trace_policy_evidence(trace).passed)
             self.assertEqual(workspace_summary(sandbox)["state_hash"], sandbox.state_hash())
-            self.assertEqual(trace_to_sft(trace, report)["trace_id"], trace.trace_id)
+            sft = trace_to_sft(trace, report)
+            self.assertEqual(sft["trace_id"], trace.trace_id)
+            self.assertTrue(
+                any(
+                    message.get("reasoning_content") == "patch succeeded"
+                    for message in sft["messages"]
+                )
+            )
             episode = trace_to_rl_episode(trace, report)
             self.assertEqual(episode["schema"], "easy_agentic_data.rl_episode.v1")
             self.assertEqual(episode["steps"][-1]["reward"], 1)
             self.assertEqual(episode["steps"][0]["loss_mask"], 0)
             self.assertEqual(episode["steps"][-1]["action_type"], "answer")
+            self.assertEqual(episode["steps"][-1]["reasoning_content"], "patch succeeded")
             self.assertTrue(analysis_record(trace, report)["success"])
 
     def test_turn_rewards_attach_to_rl_episode_actions(self) -> None:
@@ -95,11 +105,7 @@ class EvaluationExportTests(unittest.TestCase):
             any(step.get("reward_kind") == "tool_execution" for step in episode["steps"])
         )
         self.assertTrue(
-            all(
-                step["loss_mask"] == 0
-                for step in episode["steps"]
-                if step["role"] != "assistant"
-            )
+            all(step["loss_mask"] == 0 for step in episode["steps"] if step["role"] != "assistant")
         )
 
     def test_preference_requires_positive_deterministic_margin(self) -> None:
@@ -164,6 +170,23 @@ class EvaluationExportTests(unittest.TestCase):
         self.assertEqual([item.reward for item in ranked], [1, 1, 0])
         self.assertEqual(ranked[0].metrics["turns"], 2)
 
+    def test_agent_termination_gate_prevents_budget_success(self) -> None:
+        sandbox = _sandbox()
+        instance = _instance(sandbox.state_hash())
+        report = EvaluationSuite([RequiredStateEvaluator()]).evaluate(sandbox, instance)
+        self.assertFalse(report.success)
+
+        sandbox.write("app.py", "value = 2\n")
+        successful = EvaluationSuite([RequiredStateEvaluator()]).evaluate(sandbox, instance)
+        gated = apply_agent_termination(successful, TerminationReason.TOKEN_BUDGET)
+        preserved = apply_agent_termination(successful, TerminationReason.AGENT_STOP)
+
+        self.assertTrue(successful.success)
+        self.assertFalse(gated.success)
+        self.assertEqual(gated.reward, 0)
+        self.assertEqual(gated.results[-1].evaluator, "agent_termination")
+        self.assertTrue(preserved.success)
+
 
 class _PatchClient:
     model = "patch-client"
@@ -178,7 +201,7 @@ class _PatchClient:
                 "patch", "apply_patch", {"path": "app.py", "old": "value = 1", "new": "value = 2"}
             ),
             _call("test", "run_command", {"command": ["python", "-m", "visible_test"]}),
-            Message("assistant", "Done."),
+            Message("assistant", "Done.", reasoning_content="patch succeeded"),
         ]
         message = script[self.index]
         self.index += 1

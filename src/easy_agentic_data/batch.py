@@ -341,7 +341,7 @@ def quality_report(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
     reward_groups: dict[str, list[float]] = {}
     success_by_goal_type: dict[str, dict[str, float]] = {}
-    for row, reward in zip(items, rewards):
+    for row, reward in zip(items, rewards, strict=False):
         scenario_id = str(row.get("scenario_id") or row.get("prompt_group") or "default")
         reward_groups.setdefault(scenario_id, []).append(reward)
         goal_type = str(row.get("goal_type") or row.get("category") or "")
