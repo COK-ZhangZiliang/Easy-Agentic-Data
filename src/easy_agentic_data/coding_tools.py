@@ -6,6 +6,11 @@ from typing import Any
 from easy_agentic_data.policy import PolicyDecision, ToolPolicy
 from easy_agentic_data.sandbox import Sandbox
 
+MAX_LIST_FILES = 500
+MAX_READ_CHARS = 40_000
+MAX_SEARCH_MATCHES = 200
+MAX_SEARCH_LINE_CHARS = 500
+
 
 @dataclass
 class CodingToolResult:
@@ -29,9 +34,12 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 DESCRIPTIONS = {
-    "list_files": "List workspace files under an optional relative directory.",
-    "read_file": "Read a UTF-8 text file at a workspace-relative path.",
-    "search_files": "Search text files for an exact string and return matching lines.",
+    "list_files": "List workspace files under an optional relative directory with bounded output.",
+    "read_file": "Read a UTF-8 text file at a workspace-relative path with bounded output.",
+    "search_files": (
+        "Search text files for an exact string and return matching lines. Binary or unreadable "
+        "files are skipped."
+    ),
     "apply_patch": (
         "Replace the first exact occurrence of old with new in one workspace file. "
         "Read the file first so old contains precise context."
@@ -81,17 +89,22 @@ class CodingToolRuntime:
 
     def _execute_allowed(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "list_files":
-            return self.sandbox.list_files(arguments.get("path", "."))
+            files = self.sandbox.list_files(arguments.get("path", "."))
+            return {
+                "files": files[:MAX_LIST_FILES],
+                "file_count": len(files),
+                "truncated": len(files) > MAX_LIST_FILES,
+            }
         if name == "read_file":
-            return self.sandbox.read(arguments["path"])
+            content = self.sandbox.read(arguments["path"])
+            return {
+                "path": arguments["path"],
+                "content": content[:MAX_READ_CHARS],
+                "chars": len(content),
+                "truncated": len(content) > MAX_READ_CHARS,
+            }
         if name == "search_files":
-            query = arguments["query"]
-            return [
-                {"path": path, "line": number, "text": line}
-                for path in self.sandbox.list_files()
-                for number, line in enumerate(self.sandbox.read(path).splitlines(), 1)
-                if query in line
-            ]
+            return self._search_files(arguments["query"])
         if name == "apply_patch":
             content = self.sandbox.read(arguments["path"])
             if arguments["old"] not in content:
@@ -109,6 +122,65 @@ class CodingToolRuntime:
         if name == "ask_user":
             return {"question": arguments["question"], "awaiting_user": True}
         raise ValueError(f"Unknown coding tool: {name}")
+
+    def _search_files(self, query: str) -> dict[str, Any]:
+        grep = self.sandbox.execute(
+            [
+                "grep",
+                "-R",
+                "-n",
+                "-I",
+                "-m",
+                str(MAX_SEARCH_MATCHES),
+                "--",
+                query,
+                ".",
+            ]
+        )
+        if grep.exit_code in {0, 1}:
+            matches = _parse_grep_matches(grep.stdout)
+            return {
+                "matches": matches[:MAX_SEARCH_MATCHES],
+                "match_count": len(matches),
+                "skipped_count": 0,
+                "truncated": len(matches) > MAX_SEARCH_MATCHES or grep.truncated,
+            }
+        if grep.exit_code == 127 and "Unsupported test command" in grep.stderr:
+            return self._search_files_by_reading(query)
+        return {
+            "matches": [],
+            "match_count": 0,
+            "skipped_count": 0,
+            "truncated": False,
+            "grep_exit_code": grep.exit_code,
+            "grep_error": grep.stderr[:1_000],
+        }
+
+    def _search_files_by_reading(self, query: str) -> dict[str, Any]:
+        matches = []
+        skipped = []
+        for path in self.sandbox.list_files():
+            try:
+                content = self.sandbox.read(path)
+            except (OSError, UnicodeDecodeError) as exc:
+                skipped.append({"path": path, "reason": type(exc).__name__})
+                continue
+            for number, line in enumerate(content.splitlines(), 1):
+                if query in line:
+                    matches.append(_search_match(path, number, line))
+                if len(matches) >= MAX_SEARCH_MATCHES:
+                    return {
+                        "matches": matches,
+                        "match_count": len(matches),
+                        "skipped_count": len(skipped),
+                        "truncated": True,
+                    }
+        return {
+            "matches": matches,
+            "match_count": len(matches),
+            "skipped_count": len(skipped),
+            "truncated": False,
+        }
 
 
 def _validate(name: str, arguments: dict[str, Any]) -> None:
@@ -139,4 +211,34 @@ def _json_schema(schema: dict[str, Any]) -> dict[str, Any]:
         "properties": properties,
         "required": schema["required"],
         "additionalProperties": False,
+    }
+
+
+def _parse_grep_matches(output: str) -> list[dict[str, Any]]:
+    matches = []
+    for line in output.splitlines():
+        path, number, text = _split_grep_line(line)
+        if path:
+            matches.append(_search_match(path, number, text))
+    return matches
+
+
+def _split_grep_line(line: str) -> tuple[str, int, str]:
+    parts = line.split(":", 2)
+    if len(parts) != 3:
+        return "", 0, ""
+    path, number, text = parts
+    try:
+        line_number = int(number)
+    except ValueError:
+        return "", 0, ""
+    return path.removeprefix("./"), line_number, text
+
+
+def _search_match(path: str, number: int, line: str) -> dict[str, Any]:
+    return {
+        "path": path,
+        "line": number,
+        "text": line[:MAX_SEARCH_LINE_CHARS],
+        "text_truncated": len(line) > MAX_SEARCH_LINE_CHARS,
     }

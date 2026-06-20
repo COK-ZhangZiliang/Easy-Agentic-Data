@@ -62,8 +62,14 @@ class SandboxToolTests(unittest.TestCase):
 
     def test_policy_denies_network_and_path_escape(self) -> None:
         network = self.runtime.execute("run_command", {"command": ["curl", "https://example.com"]})
+        install = self.runtime.execute("run_command", {"command": ["pip", "install", "-e", "."]})
+        offline_install = self.runtime.execute(
+            "run_command", {"command": ["pip", "install", "--no-deps", "-e", "."]}
+        )
         escaped = self.runtime.execute("read_file", {"path": "../secret"})
         self.assertIn("Network access is disabled", network.error or "")
+        self.assertIn("Package installation is blocked", install.error or "")
+        self.assertNotIn("Package installation is blocked", offline_install.error or "")
         self.assertIn("forbidden host path", escaped.error or "")
 
     def test_adversarial_arguments_and_oversized_output_are_contained(self) -> None:
@@ -83,13 +89,71 @@ class SandboxToolTests(unittest.TestCase):
         result = self.runtime.execute("read_file", {"path": "app.py", "extra": True})
         self.assertIn("Unexpected tool arguments", result.error or "")
 
+    def test_search_files_skips_unreadable_files(self) -> None:
+        sandbox = _UnreadableFileSandbox(
+            {
+                "app.py": "def value():\n    return 1\n",
+                "assets/logo.png": "",
+            }
+        )
+        sandbox.create()
+        runtime = CodingToolRuntime(sandbox, ToolPolicy(["search_files"]))
+
+        result = runtime.execute("search_files", {"query": "return"})
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output["match_count"], 1)
+        self.assertEqual(result.output["skipped_count"], 1)
+        self.assertFalse(result.output["truncated"])
+
+    def test_search_files_uses_sandbox_grep_when_available(self) -> None:
+        sandbox = _GrepSandbox({"app.py": "unused\n"})
+        sandbox.create()
+        runtime = CodingToolRuntime(sandbox, ToolPolicy(["search_files"]))
+
+        result = runtime.execute("search_files", {"query": "needle"})
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output["matches"][0]["path"], "src/app.py")
+        self.assertEqual(result.output["matches"][0]["line"], 7)
+        self.assertEqual(result.output["match_count"], 1)
+
+    def test_search_files_does_not_slow_fallback_after_real_grep_failure(self) -> None:
+        sandbox = _FailingGrepSandbox({"app.py": "needle\n"})
+        sandbox.create()
+        runtime = CodingToolRuntime(sandbox, ToolPolicy(["search_files"]))
+
+        result = runtime.execute("search_files", {"query": "needle"})
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output["grep_exit_code"], 2)
+        self.assertIn("bad grep", result.output["grep_error"])
+
+    def test_file_tools_return_bounded_structured_outputs(self) -> None:
+        files = {f"file_{index}.txt": "x" for index in range(510)}
+        files["large.txt"] = "a" * 40_010
+        sandbox = MemorySandbox(files)
+        sandbox.create()
+        runtime = CodingToolRuntime(sandbox, ToolPolicy(["list_files", "read_file"]))
+
+        listed = runtime.execute("list_files", {"path": "."})
+        read = runtime.execute("read_file", {"path": "large.txt"})
+
+        self.assertEqual(listed.output["file_count"], 511)
+        self.assertEqual(len(listed.output["files"]), 500)
+        self.assertTrue(listed.output["truncated"])
+        self.assertEqual(read.output["chars"], 40_010)
+        self.assertEqual(len(read.output["content"]), 40_000)
+        self.assertTrue(read.output["truncated"])
+
     def test_docker_backend_requires_digest_and_uses_safe_flags(self) -> None:
-        with self.assertRaisesRegex(ValueError, "pinned by digest"):
+        with self.assertRaisesRegex(ValueError, "content-addressed by digest"):
             DockerSandbox(image_digest="python:3.11", source_directory=".")
         sandbox = DockerSandbox(
             image_digest="python@sha256:" + "a" * 64,
             source_directory=".",
         )
+        local_image = DockerSandbox(image_digest="sha256:" + "b" * 64, source_directory=".")
         calls = []
 
         def capture(command, **kwargs):
@@ -102,10 +166,40 @@ class SandboxToolTests(unittest.TestCase):
         ):
             sandbox.create()
         create = next(call for call in calls if call[:2] == ["docker", "create"])
+        self.assertEqual(local_image.image_digest, "sha256:" + "b" * 64)
         self.assertIn("none", create)
         self.assertIn("--read-only", create)
         self.assertIn("--pids-limit", create)
         self.assertNotIn("/var/run/docker.sock", " ".join(create))
+
+
+class _UnreadableFileSandbox(MemorySandbox):
+    def read(self, path: str) -> str:
+        if path == "assets/logo.png":
+            raise UnicodeDecodeError("utf-8", b"\x89", 0, 1, "invalid start byte")
+        return super().read(path)
+
+
+class _GrepSandbox(MemorySandbox):
+    def execute(self, command, *, timeout_seconds=None):
+        del timeout_seconds
+        if command[:4] == ["grep", "-R", "-n", "-I"]:
+            return CommandResult(0, "./src/app.py:7:contains needle\n", "", 1.0)
+        return super().execute(command)
+
+    def read(self, path: str) -> str:
+        raise AssertionError(f"grep-backed search should not read {path}")
+
+
+class _FailingGrepSandbox(MemorySandbox):
+    def execute(self, command, *, timeout_seconds=None):
+        del timeout_seconds
+        if command[:4] == ["grep", "-R", "-n", "-I"]:
+            return CommandResult(2, "", "bad grep option\n", 1.0)
+        return super().execute(command)
+
+    def read(self, path: str) -> str:
+        raise AssertionError(f"failing grep should not read {path}")
 
 
 if __name__ == "__main__":

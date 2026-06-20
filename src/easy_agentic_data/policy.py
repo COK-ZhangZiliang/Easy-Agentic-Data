@@ -27,7 +27,29 @@ class ToolPolicy:
         if ".." in encoded or "/etc/" in encoded or "/var/run/docker.sock" in encoded:
             return PolicyDecision("deny", "Arguments reference a forbidden host path")
         if name == "run_command" and not self.network_enabled:
-            command = " ".join(arguments.get("command", []))
+            tokens = [str(token) for token in arguments.get("command", [])]
+            command = " ".join(tokens)
             if any(term in command for term in ("curl ", "wget ", "http://", "https://")):
                 return PolicyDecision("deny", "Network access is disabled")
+            if _looks_like_network_install(tokens):
+                return PolicyDecision(
+                    "deny",
+                    "Package installation is blocked while network access is disabled",
+                )
         return PolicyDecision("allow", "Allowed by scenario capability policy")
+
+
+def _looks_like_network_install(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    first = tokens[0]
+    joined = " ".join(tokens)
+    if first in {"pip", "pip3"} and " install " in f" {joined} ":
+        return "--no-index" not in tokens and "--no-deps" not in tokens
+    if tokens[:3] in (["python", "-m", "pip"], ["python3", "-m", "pip"]):
+        return "install" in tokens and "--no-index" not in tokens and "--no-deps" not in tokens
+    if first in {"npm", "pnpm", "yarn"} and any(token in tokens for token in {"install", "add"}):
+        return True
+    if first in {"apt", "apt-get", "apk", "yum", "dnf", "brew"}:
+        return True
+    return False
