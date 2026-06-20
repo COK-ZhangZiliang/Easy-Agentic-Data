@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -49,3 +50,9 @@ def _reject_secret_metadata(metadata: dict[str, Any]) -> None:
         normalized = key.lower().replace("-", "_")
         if any(term in normalized for term in forbidden):
             raise ValueError(f"Environment metadata cannot contain secret-like field: {key}")
+
+
+def is_immutable_image_reference(image: str) -> bool:
+    """Return whether an image reference is content-addressed."""
+
+    return "@sha256:" in image or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", image) is not None

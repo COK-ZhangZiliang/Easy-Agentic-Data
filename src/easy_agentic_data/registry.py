@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from easy_agentic_data.environments import EnvironmentSpec
+from easy_agentic_data.environments import EnvironmentSpec, is_immutable_image_reference
 from easy_agentic_data.scenarios import HiddenEvaluatorContext, Scenario, ScenarioInstance
 from easy_agentic_data.seeds import PublicTaskContext, QuerySeed
 
@@ -175,11 +175,13 @@ class ScenarioRegistry:
                 )
         for path in sorted(self.environment_dir.glob("*.json")):
             environment = EnvironmentSpec.from_dict(_read_json(path))
-            if environment.image_digest and "@sha256:" not in environment.image_digest:
+            if environment.image_digest and not is_immutable_image_reference(
+                environment.image_digest
+            ):
                 issues.append(
                     RegistryIssue(
                         "mutable_image",
-                        "Environment image is not pinned by digest",
+                        "Environment image is not content-addressed by digest",
                         environment.environment_id,
                     )
                 )

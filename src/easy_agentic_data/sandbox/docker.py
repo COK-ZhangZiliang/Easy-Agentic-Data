@@ -7,6 +7,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from easy_agentic_data.environments import is_immutable_image_reference
+
 from .base import CommandResult, SandboxLimits
 
 
@@ -21,8 +23,8 @@ class DockerSandbox:
         limits: SandboxLimits | None = None,
         network_enabled: bool = False,
     ) -> None:
-        if "@sha256:" not in image_digest:
-            raise ValueError("Docker images must be pinned by digest")
+        if not is_immutable_image_reference(image_digest):
+            raise ValueError("Docker images must be content-addressed by digest")
         self.image_digest = image_digest
         self.source_directory = Path(source_directory).resolve()
         self.limits = limits or SandboxLimits()
