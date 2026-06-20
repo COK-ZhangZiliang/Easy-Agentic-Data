@@ -55,14 +55,15 @@ def replay_trace(trace_or_path: Trace | str | Path) -> ReplayResult:
                 }
             )
         elif event.event_type is EventType.MODEL_RESPONSE:
-            state.messages.append(
-                {
-                    "message_id": payload["message_id"],
-                    "role": "assistant",
-                    "content": payload["content"],
-                    "tool_calls": payload.get("tool_calls", []),
-                }
-            )
+            message = {
+                "message_id": payload["message_id"],
+                "role": "assistant",
+                "content": payload["content"],
+                "tool_calls": payload.get("tool_calls", []),
+            }
+            if payload.get("reasoning_content") is not None:
+                message["reasoning_content"] = payload["reasoning_content"]
+            state.messages.append(message)
         elif event.event_type is EventType.TOOL_REQUESTED:
             state.tool_calls[payload["call_id"]] = {
                 "name": payload["name"],

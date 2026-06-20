@@ -105,7 +105,7 @@ def _event_to_episode_step(event) -> dict[str, Any] | None:
             "action_mask": 0,
         }
     if event.event_type is EventType.MODEL_RESPONSE:
-        return {
+        step = {
             "event_id": event.event_id,
             "event_type": event.event_type.value,
             "role": "assistant",
@@ -118,6 +118,9 @@ def _event_to_episode_step(event) -> dict[str, Any] | None:
             "loss_mask": 1,
             "action_mask": 1,
         }
+        if payload.get("reasoning_content") is not None:
+            step["reasoning_content"] = payload["reasoning_content"]
+        return step
     if event.event_type is EventType.TOOL_REQUESTED:
         return {
             "event_id": event.event_id,

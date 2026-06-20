@@ -40,6 +40,9 @@ class Message:
             data["reasoning_content"] = self.reasoning_content
         return data
 
+    def to_training_dict(self) -> dict[str, Any]:
+        return self.to_api_dict(include_reasoning_content=self.role == "assistant")
+
 
 @dataclass
 class LLMResponse:
@@ -111,14 +114,14 @@ class Trajectory:
                 "traj",
                 {
                     "task_id": self.task.task_id,
-                    "messages": [message.to_api_dict() for message in self.messages],
+                    "messages": [message.to_training_dict() for message in self.messages],
                     "rollout_index": self.metadata.get("rollout_index"),
                 },
             )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["messages"] = [message.to_api_dict() for message in self.messages]
+        data["messages"] = [message.to_training_dict() for message in self.messages]
         return data
 
 

@@ -26,7 +26,7 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 def trajectory_to_sft(trajectory: Trajectory) -> dict[str, Any]:
     return {
         "id": trajectory.trajectory_id,
-        "messages": [message.to_api_dict() for message in trajectory.messages],
+        "messages": [message.to_training_dict() for message in trajectory.messages],
         "metadata": {
             "task_id": trajectory.task.task_id,
             "category": trajectory.task.category,
@@ -47,7 +47,7 @@ def trajectory_to_sft(trajectory: Trajectory) -> dict[str, Any]:
 
 def preference_to_training(pair: PreferencePair) -> dict[str, Any]:
     prompt = [
-        message.to_api_dict()
+        message.to_training_dict()
         for message in pair.chosen.messages
         if message.role in {"system", "user"}
     ]
@@ -55,12 +55,12 @@ def preference_to_training(pair: PreferencePair) -> dict[str, Any]:
         "id": pair.pair_id,
         "prompt": prompt,
         "chosen": [
-            message.to_api_dict()
+            message.to_training_dict()
             for message in pair.chosen.messages
             if message.role not in {"system", "user"}
         ],
         "rejected": [
-            message.to_api_dict()
+            message.to_training_dict()
             for message in pair.rejected.messages
             if message.role not in {"system", "user"}
         ],

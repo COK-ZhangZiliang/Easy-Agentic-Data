@@ -96,6 +96,7 @@ class HeadlessAgent:
                 {
                     "message_id": f"assistant_{turn}",
                     "content": assistant.content,
+                    "reasoning_content": assistant.reasoning_content,
                     "tool_calls": assistant.tool_calls,
                     "model": response.model,
                     "usage": response.usage,

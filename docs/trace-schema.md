@@ -40,6 +40,12 @@ truncated final JSONL fragment is not part of the trace ID.
 Every event type has required payload fields enforced by the loader. Unknown event types and schema
 versions fail closed.
 
+`model_response` may include optional assistant `reasoning_content`. When present, it is treated as
+part of the generated agent response and can be carried into SFT, preference, and RL episode
+exports. This field remains subject to the same hidden-context and secret-exposure checks as the
+visible assistant content. Evaluator-only reasoning and hidden-context reasoning must not be
+recorded as agent `model_response` events.
+
 ## Public and Hidden Context
 
 Trace events are public, observable interaction records. They must not contain:
@@ -70,4 +76,3 @@ error. Strict loading also treats a partial final line as an error.
 7. Reject versions newer than the current reader rather than guessing their meaning.
 
 No migration is currently required because version 1 is the initial schema.
-
