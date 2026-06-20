@@ -9,7 +9,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-63%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-83%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) · [Local Models](#local-llm-api) ·
@@ -131,6 +131,61 @@ ead run --config examples/minimal.json
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
+## Synthesis Tiers
+
+The project separates synthesis into three tiers so smoke tests, complex synthetic trajectories,
+and production-style registry rollouts are not confused with one another:
+
+```bash
+ead synthesis tiers
+```
+
+| Tier | Purpose | Default path |
+| --- | --- | --- |
+| `smoke` | Cheap provider and export-path checks | `ead run --config examples/minimal.json` |
+| `complex_synthetic` | Multi-step agent trajectory validation without external repos | `ead synthesis complex-demo --output runs/complex-synthetic-demo` |
+| `registry_backed` | Production-style query/workspace seeds in Docker | `ead synthesis real-seed-demo ...` or `ead registry import ...` then `ead agent-run ...` |
+
+The complex synthetic tier creates a repository-like fixture, asks the simulated user for missing
+requirements, reads and patches files, runs a visible test, inspects a diff, runs hidden
+evaluation, and writes SFT, RL, analysis, and replayable trace artifacts:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis complex-demo \
+  --output runs/complex-synthetic-demo
+```
+
+For a real registry-backed slice, use the SWE-bench Lite dataset as the seed source. The command
+downloads a small page of rows, clones the referenced GitHub repository at `base_commit` into a
+local cache, imports the scenario into the registry, and keeps the gold patch and test patch hidden
+from public prompts and traces:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
+  --output runs/real-seed-demo \
+  --dataset princeton-nlp/SWE-bench_Lite \
+  --split dev \
+  --limit 1
+```
+
+When Docker is running and a live DeepSeek key is available, add the thinking-enabled config to
+produce one real model/tool trajectory. For repository-specific images built locally, pass the
+content-addressed image id as `sha256:<image-id>` and use setup commands for offline workspace
+initialization before the agent starts:
+
+```bash
+export DEEPSEEK_API_KEY=...
+export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
+  --output runs/real-seed-demo \
+  --config examples/deepseek-v4-flash-thinking.json \
+  --trace runs/real-seed-demo/trace.jsonl \
+  --image-digest sha256:<local-image-id> \
+  --setup-command 'python -m pip install --no-deps -e .' \
+  --max-agent-tokens 200000
+```
+
 ## Local LLM API
 
 Use `local_openai_compatible` with a local or private chat-completions server such as vLLM,
@@ -181,10 +236,24 @@ export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
 ```
 
 DeepSeek thinking mode is supported by the client when enabled through `llm.request_body`.
-Assistant `reasoning_content` is sent back only during the active provider conversation because
-DeepSeek requires it for continued reasoning. It is excluded from canonical trajectories and
-training exports. Keep thinking disabled unless a scenario benefits from it. See the
-[DeepSeek API documentation](https://api-docs.deepseek.com/) for current model and protocol details.
+Assistant `reasoning_content` is sent back during the active provider conversation because
+DeepSeek requires it for continued reasoning, and assistant reasoning from generated agent
+responses is preserved in raw trajectories and training exports as an explicit training signal.
+Evaluator-only and hidden-context reasoning must not be mixed into agent training records. Keep
+thinking disabled unless a scenario benefits from it. See the [DeepSeek API documentation](https://api-docs.deepseek.com/)
+for current model and protocol details.
+
+Use `examples/deepseek-v4-flash-thinking.json` for live registry-backed coding trajectories that
+need thinking mode and tool calls. The config sets:
+
+```json
+{
+  "thinking": {
+    "type": "enabled"
+  },
+  "reasoning_effort": "high"
+}
+```
 
 ## Sandboxed Agent Runs
 
@@ -194,6 +263,14 @@ environment source, capability policy, hidden evaluator checks, and reset proced
 ```bash
 ead registry validate --root registry/
 ead registry list --root registry/
+
+ead registry import \
+  --root registry/ \
+  --source examples/swe-style-seeds.jsonl \
+  --format swe-bench \
+  --source-name sample/swe-style \
+  --split train \
+  --license MIT
 
 ead agent-run \
   --registry registry/ \
@@ -207,6 +284,32 @@ Replay a trace without calling a model or executing a tool:
 ```bash
 ead replay --trace runs/agent.jsonl
 ```
+
+### Importing Query and Workspace Seeds
+
+The registry importer accepts local JSON or JSONL records shaped like SWE-bench, SWE-smith, and
+Multi-SWE-bench exports. Each imported record creates:
+
+- a `QuerySeed` from the issue or problem statement;
+- an `EnvironmentSpec` from the repository, fixed revision, image, setup, and health metadata;
+- a `Scenario` that binds the query seed to the workspace and keeps evaluator details hidden.
+
+```bash
+ead registry import \
+  --root registry/ \
+  --source path/to/swe-style-records.jsonl \
+  --format auto \
+  --source-name SWE-bench/SWE-smith \
+  --split train \
+  --license MIT \
+  --permitted-use research
+```
+
+The importer records gold patches and test patches as hidden source references plus SHA-256
+hashes. It does not place raw reference patches or hidden test IDs in public scenario views.
+If a source provides test identifiers instead of executable commands, keep them in evaluator
+metadata or provide a safe command template such as
+`--test-command-template 'python -m pytest {test}'` for compatible repositories.
 
 ### Docker on macOS
 
@@ -282,7 +385,10 @@ src/easy_agentic_data/
 ├── generation.py      # Task generation and difficulty evolution
 ├── governance.py      # Sensitive-data and retention controls
 ├── registry.py        # Scenario storage, validation, and materialization
+├── real_seed_sources.py # Real seed download, repository clone, and registry preparation
+├── registry_sources.py # External SWE-style seed-source import adapters
 ├── simulation.py      # Simulated user implementations
+├── synthesis_tiers.py # Smoke, complex synthetic, and registry-backed synthesis paths
 └── trace_exporters.py # SFT, preference, RL, and analysis exports
 ```
 
@@ -294,6 +400,7 @@ src/easy_agentic_data/
 - [Trace schema](docs/trace-schema.md): event contracts and migration policy
 - [Sandbox ADR](docs/adr-0001-docker-sandbox.md): Docker isolation decision
 - [RL episode ADR](docs/adr-0002-rl-episode-export.md): action/loss-mask export contract
+- [Synthesis tiers ADR](docs/adr-0003-synthesis-tiers.md): smoke, complex synthetic, and registry-backed contract
 - [Threat model](docs/threat-model.md): trust boundaries, risks, and controls
 
 ## Development Status

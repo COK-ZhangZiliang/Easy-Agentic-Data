@@ -58,6 +58,8 @@ The first production-capable release must:
 - [x] Deterministic evaluation and SFT, preference, RL, and analysis exports
 - [x] Persistent batch scheduling, recovery, and supporting reliability utilities
 - [x] DeepSeek V4 Flash and generic local OpenAI-compatible provider validation
+- [x] Three-tier synthesis workflow separating smoke, complex synthetic, and registry-backed data
+- [x] Real SWE-bench Lite seed preparation with fixed-commit repository cloning
 
 The core P0-P4 architecture and the P5 scheduler are implemented. Production integration remains
 for registry health checks, independent resource gates, call caching, hard budget admission,
@@ -80,7 +82,9 @@ src/easy_agentic_data/
   coding_tools.py      # Policy-governed coding capability pack
   scenarios.py         # Public and hidden scenario contexts
   registry.py          # Git registry validation and SQLite discovery index
+  real_seed_sources.py # Real seed download, repository clone, and registry preparation
   simulation.py        # Rule-based and LLM-backed simulated users
+  synthesis_tiers.py   # Smoke, complex synthetic, and registry-backed synthesis workflows
   evaluation.py        # Deterministic evaluators and reward reports
   trace_exporters.py   # Canonical trace dataset exports
   batch.py             # Persistent scheduling, recovery, and quality reports
@@ -190,6 +194,11 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add repository import from a fixed commit.
 - [x] Add mutation-based coding task generation with a guaranteed failing test.
 - [x] Add task import from issue/commit pairs without exposing the reference patch.
+- [x] Add external SWE-style JSON/JSONL import for paired query and workspace seed records.
+- [x] Add SWE-bench Lite preparation that fetches real seed records and clones repositories at
+  fixed commits before registry-backed agent runs.
+- [x] Execute environment setup commands before registry-backed agent runs so real workspaces can
+  be initialized offline from prebuilt images.
 - [x] Add semantic and exact duplicate detection hooks.
 - [x] Add CLI commands to list, validate, materialize, and inspect registry entries.
 - [ ] Execute each environment `health_check` during materialization and repeated reset validation.
@@ -307,6 +316,7 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
   depth, policy denials, and infrastructure failures.
 - [x] Add reward variance, low-information rollout group, goal-type success, simulator-error, and
   goal-alignment diagnostics to batch quality reports.
+- [x] Add explicit smoke, complex synthetic, and registry-backed synthesis tiers.
 - [ ] Add configurable human-review sampling and reviewer feedback ingestion.
 - [x] Add a pluggable worker protocol after stabilizing the local scheduler contract.
 
@@ -330,7 +340,7 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - `DEFERRED` Real production business write APIs
 - `DEFERRED` Built-in model training loops
 - `DEFERRED` Distributed execution before the local scheduler and data contracts stabilize
-- `DEFERRED` Storing or training on private hidden chain-of-thought
+- `DEFERRED` Storing or training on evaluator-only or hidden-context chain-of-thought
 
 ## Cross-Cutting Workstreams
 
@@ -402,5 +412,8 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-06-12 | Installed Docker CLI and Colima, then passed real container isolation and end-to-end headless coding-agent integration tests. |
 | 2026-06-15 | Validated DeepSeek V4 Flash with real structured generation, tool calls, semantic evaluation, dataset export, and a Docker coding-agent repair trajectory. |
 | 2026-06-15 | Added provider request options, reasoning-context round trips, bounded HTTP retries, response validation, policy-filtered tool schemas, improved prompts, and opt-in live-provider tests. |
-| 2026-06-15 | Synchronized implementation status and package layout, documented remaining P2/P5 integration gaps, rejected empty generation batches, and excluded provider reasoning context from canonical datasets. |
+| 2026-06-15 | Synchronized implementation status and package layout, documented remaining P2/P5 integration gaps, rejected empty generation batches, and separated provider reasoning context from canonical datasets. |
 | 2026-06-17 | Added RL episode action/loss-mask exports, deterministic turn rewards, simulator goal-state metrics, and batch reward-variance diagnostics. |
+| 2026-06-17 | Added SWE-style query/workspace seed import from local JSON and JSONL sources into the scenario registry. |
+| 2026-06-17 | Preserved assistant `reasoning_content` in trajectory, SFT, preference, and RL episode exports while keeping hidden-context reasoning out of agent records. |
+| 2026-06-19 | Added three synthesis tiers plus a complex synthetic multi-tool trajectory generator with hidden evaluation and derived exports. |
