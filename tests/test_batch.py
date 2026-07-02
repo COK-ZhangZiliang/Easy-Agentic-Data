@@ -680,6 +680,22 @@ class BatchTests(unittest.TestCase):
 
         self.assertEqual(job_ids, ["job_a", "job_b"])
 
+    def test_selected_job_ids_for_run_treats_missing_shard_ids_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estimate_path = Path(directory) / "estimate.json"
+            estimate_path.write_text(
+                json.dumps({"shards": [{"max_jobs": 5}]}),
+                encoding="utf-8",
+            )
+
+            job_ids = _selected_job_ids_for_run(
+                explicit_job_ids=[],
+                job_id_file=estimate_path,
+                shard_index=0,
+            )
+
+        self.assertIsNone(job_ids)
+
     def test_selected_job_status_summarizes_explicit_jobs(self) -> None:
         rows = [
             {"job_id": "job_a", "status": "completed", "success": 1, "tokens": 10},

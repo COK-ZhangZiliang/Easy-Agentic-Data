@@ -742,7 +742,7 @@ def _selected_job_ids_for_run(
             shards = payload["shards"]
             if shard_index < 0 or shard_index >= len(shards):
                 raise ValueError(f"Shard index {shard_index} is outside the estimate shard range")
-            file_ids = shards[shard_index].get("job_ids", {})
+            file_ids = shards[shard_index].get("job_ids", [])
         elif isinstance(payload, dict):
             file_ids = payload.get("job_ids", [])
         else:
