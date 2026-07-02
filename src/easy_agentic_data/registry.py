@@ -66,13 +66,21 @@ class ScenarioRegistry:
                 );
                 """
             )
+            _ensure_seed_columns(connection)
 
     def add_seed(self, seed: QuerySeed) -> None:
         self.initialize()
         _write_json(self.seed_dir / f"{seed.seed_id}.json", seed.to_dict())
         with self._connect() as connection:
             connection.execute(
-                "INSERT OR REPLACE INTO seeds VALUES (?, ?, ?, ?, ?, ?)",
+                """
+                INSERT OR REPLACE INTO seeds (
+                    seed_id, category, difficulty, split, provenance, query_hash,
+                    task_family, source_method, train_eligible, contamination_tags,
+                    verifier_types, coverage_tags
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     seed.seed_id,
                     seed.category,
@@ -80,6 +88,12 @@ class ScenarioRegistry:
                     seed.split,
                     seed.provenance,
                     _normalized_query(seed.public.query),
+                    seed.task_family,
+                    seed.source_method,
+                    int(seed.train_eligible),
+                    json.dumps(seed.contamination_tags, sort_keys=True),
+                    json.dumps(seed.verifier_types, sort_keys=True),
+                    json.dumps(seed.coverage_tags, sort_keys=True),
                 ),
             )
 
@@ -125,6 +139,12 @@ class ScenarioRegistry:
                 "SELECT scenario_id, seed_id, environment_id FROM scenarios ORDER BY scenario_id"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_seeds(self) -> list[QuerySeed]:
+        self.initialize()
+        return [
+            QuerySeed.from_dict(_read_json(path)) for path in sorted(self.seed_dir.glob("*.json"))
+        ]
 
     def materialize(
         self,
@@ -375,6 +395,23 @@ def _semantic_tokens(value: str) -> list[str]:
 
 def _normalized_query(value: str) -> str:
     return " ".join(_tokens(value))
+
+
+def _ensure_seed_columns(connection: sqlite3.Connection) -> None:
+    existing = {
+        row["name"] for row in connection.execute("PRAGMA table_info(seeds)").fetchall()
+    }
+    columns = {
+        "task_family": "TEXT DEFAULT 'general'",
+        "source_method": "TEXT DEFAULT 'unspecified'",
+        "train_eligible": "INTEGER DEFAULT 1",
+        "contamination_tags": "TEXT DEFAULT '[]'",
+        "verifier_types": "TEXT DEFAULT '[]'",
+        "coverage_tags": "TEXT DEFAULT '[]'",
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE seeds ADD COLUMN {name} {definition}")
 
 
 def _write_json(path: Path, value: Any) -> None:

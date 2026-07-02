@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -165,6 +166,62 @@ class ForbiddenStateEvaluator:
         )
 
 
+class TraceRequirementEvaluator:
+    name = "trace_quality"
+
+    def __init__(
+        self,
+        trace: Trace | None,
+        *,
+        retrieval_requirements: Iterable[str] = (),
+        trace_quality_rubric: Iterable[str] = (),
+    ) -> None:
+        self.trace = trace
+        self.retrieval_requirements = [item for item in retrieval_requirements if item]
+        self.trace_quality_rubric = [item for item in trace_quality_rubric if item]
+
+    def evaluate(self, sandbox: Sandbox, instance: ScenarioInstance) -> EvaluationEvidence:
+        del sandbox, instance
+        if self.trace is None:
+            return EvaluationEvidence(
+                self.name,
+                False,
+                0.0,
+                "Trace-quality evaluator requires a recorded trace",
+                infrastructure_failure=True,
+            )
+        observable = _observable_trace_text(self.trace)
+        inspected_tools = _inspection_tools(self.trace)
+        final_answer = _final_assistant_content(self.trace)
+        missing = [
+            requirement
+            for requirement in self.retrieval_requirements
+            if not _trace_requirement_satisfied(requirement, observable)
+        ]
+        passed = (
+            bool(final_answer.strip())
+            and not missing
+            and (not self.retrieval_requirements or bool(inspected_tools))
+        )
+        reason = (
+            "Trace retrieval and final answer requirements passed"
+            if passed
+            else "Trace retrieval or final answer requirements failed"
+        )
+        return EvaluationEvidence(
+            self.name,
+            passed,
+            1.0 if passed else 0.0,
+            reason,
+            {
+                "missing_retrieval_requirements": missing,
+                "inspected_tools": inspected_tools,
+                "final_answer_present": bool(final_answer.strip()),
+                "rubric_items": self.trace_quality_rubric,
+            },
+        )
+
+
 class EvaluationSuite:
     def __init__(self, evaluators: Iterable[DeterministicEvaluator]) -> None:
         self.evaluators = list(evaluators)
@@ -303,6 +360,58 @@ def _redact_hidden_values(text: str, hidden_values: Iterable[str]) -> str:
         if value:
             redacted = redacted.replace(value, "[redacted hidden context]")
     return redacted
+
+
+def _observable_trace_text(trace: Trace) -> str:
+    fragments: list[str] = []
+    for event in trace.events:
+        if event.event_type in {
+            EventType.USER_MESSAGE,
+            EventType.MODEL_RESPONSE,
+            EventType.TOOL_REQUESTED,
+            EventType.TOOL_FINISHED,
+        }:
+            fragments.append(str(event.payload))
+    return _normalize_observable_text("\n".join(fragments))
+
+
+def _inspection_tools(trace: Trace) -> list[str]:
+    tools = []
+    for event in trace.events:
+        if event.event_type is not EventType.TOOL_REQUESTED:
+            continue
+        name = str(event.payload.get("name") or "")
+        if name in {"list_files", "read_file", "search_files", "git_diff", "git_status"}:
+            tools.append(name)
+    return sorted(set(tools))
+
+
+def _final_assistant_content(trace: Trace) -> str:
+    for event in reversed(trace.events):
+        if event.event_type is EventType.MODEL_RESPONSE:
+            content = event.payload.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+    return ""
+
+
+def _trace_requirement_satisfied(requirement: str, observable_text: str) -> bool:
+    requirement_text = _normalize_observable_text(requirement)
+    if requirement_text and requirement_text in observable_text:
+        return True
+    path_tokens = re.findall(r"(?:[\w.-]+/)+[\w.-]+", requirement)
+    if path_tokens:
+        return all(_normalize_observable_text(path) in observable_text for path in path_tokens)
+    words = [
+        word
+        for word in re.findall(r"[a-zA-Z0-9_./-]+", requirement_text)
+        if len(word) > 2
+    ]
+    return bool(words) and all(word in observable_text for word in words)
+
+
+def _normalize_observable_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.lower()).strip()
 
 
 def pass_at_k(rewards: Iterable[int]) -> dict[str, float]:

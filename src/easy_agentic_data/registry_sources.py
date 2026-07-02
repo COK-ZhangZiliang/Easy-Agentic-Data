@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -12,9 +13,36 @@ from urllib.parse import quote
 from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.registry import ScenarioRegistry
 from easy_agentic_data.scenarios import HiddenEvaluatorContext, Scenario
+from easy_agentic_data.seed_library import (
+    benchmark_contamination_tags,
+    default_source_method_for_swe_source,
+    default_task_family_for_swe_record,
+    default_train_eligible_for_source,
+)
 from easy_agentic_data.seeds import PublicTaskContext, QuerySeed
 
-SUPPORTED_SOURCE_FORMATS = {"auto", "swe_bench", "swe_smith", "multi_swe"}
+SUPPORTED_SOURCE_FORMATS = {
+    "auto",
+    "swe_bench",
+    "swe_smith",
+    "multi_swe",
+    "public_issue",
+    "public_pr",
+    "public_issue_pr",
+}
+PUBLIC_ISSUE_PR_FORMATS = {"public_issue", "public_pr", "public_issue_pr"}
+DEFAULT_TRAIN_LICENSE_ALLOWLIST = {
+    "0bsd",
+    "apache_2.0",
+    "bsd_2_clause",
+    "bsd_3_clause",
+    "cc0_1.0",
+    "isc",
+    "mit",
+    "mpl_2.0",
+    "python_2.0",
+    "unlicense",
+}
 
 
 @dataclass
@@ -76,6 +104,11 @@ def import_swe_style_records(
     permitted_use: str = "research",
     limit: int | None = None,
     test_command_template: str = "",
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] | None = None,
+    coverage_tags: Iterable[str] | None = None,
     strict: bool = False,
 ) -> RegistryImportSummary:
     """Import SWE-style issue records as query, environment, and scenario entries."""
@@ -97,6 +130,11 @@ def import_swe_style_records(
                 license_name=license_name,
                 permitted_use=permitted_use,
                 test_command_template=test_command_template,
+                task_family=task_family,
+                source_method=source_method,
+                train_eligible=train_eligible,
+                contamination_tags=contamination_tags,
+                coverage_tags=coverage_tags,
             )
         except ValueError as exc:
             message = f"record {index}: {exc}"
@@ -111,6 +149,241 @@ def import_swe_style_records(
     return summary
 
 
+def import_public_issue_pr_records(
+    registry: ScenarioRegistry,
+    records: Iterable[dict[str, Any]],
+    *,
+    source_format: str = "public_issue_pr",
+    source_name: str = "",
+    split: str = "train",
+    license_name: str = "",
+    permitted_use: str = "research",
+    limit: int | None = None,
+    test_command_template: str = "",
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] | None = None,
+    coverage_tags: Iterable[str] | None = None,
+    train_license_allowlist: Iterable[str] = DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+    strict: bool = False,
+) -> RegistryImportSummary:
+    """Import non-benchmark public issue and PR records with fixed workspaces."""
+
+    normalized_format = _normalize_source_format(source_format)
+    if normalized_format == "auto":
+        normalized_format = "public_issue_pr"
+    if normalized_format not in PUBLIC_ISSUE_PR_FORMATS:
+        raise ValueError(f"Unsupported public issue/PR source format: {source_format}")
+    summary = RegistryImportSummary(
+        source_format=normalized_format,
+        source_name=source_name or normalized_format,
+    )
+    for index, record in enumerate(records):
+        if limit is not None and summary.imported >= limit:
+            break
+        try:
+            scenario = scenario_from_public_issue_pr_record(
+                record,
+                source_format=normalized_format,
+                source_name=summary.source_name,
+                split=split,
+                license_name=license_name,
+                permitted_use=permitted_use,
+                test_command_template=test_command_template,
+                task_family=task_family,
+                source_method=source_method,
+                train_eligible=train_eligible,
+                contamination_tags=contamination_tags,
+                coverage_tags=coverage_tags,
+                train_license_allowlist=train_license_allowlist,
+            )
+        except ValueError as exc:
+            message = f"record {index}: {exc}"
+            if strict:
+                raise ValueError(message) from exc
+            summary.skipped += 1
+            summary.issues.append(message)
+            continue
+        registry.add_scenario(scenario)
+        summary.imported += 1
+        summary.scenario_ids.append(scenario.scenario_id)
+    return summary
+
+
+def scenario_from_public_issue_pr_record(
+    record: dict[str, Any],
+    *,
+    source_format: str = "public_issue_pr",
+    source_name: str = "",
+    split: str = "train",
+    license_name: str = "",
+    permitted_use: str = "research",
+    test_command_template: str = "",
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] | None = None,
+    coverage_tags: Iterable[str] | None = None,
+    train_license_allowlist: Iterable[str] = DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+) -> Scenario:
+    """Convert a public issue or PR export into a train-safe registry scenario."""
+
+    normalized_format = _normalize_source_format(source_format)
+    if normalized_format == "auto":
+        normalized_format = "public_issue_pr"
+    if normalized_format not in PUBLIC_ISSUE_PR_FORMATS:
+        raise ValueError(f"Unsupported public issue/PR source format: {source_format}")
+    source_type = _public_source_type(record, normalized_format)
+    instance_id = _public_instance_id(record, source_type)
+    query = _query_text(record)
+    repo = _repo_name(record)
+    source_uri = _source_uri(record, repo, source_name or normalized_format)
+    if not source_uri:
+        raise ValueError("public issue/PR import requires a repository source URI")
+    revision = _fixed_source_revision(record)
+    resolved_license = license_name or _text_field(record.get("license"))
+    allowlist = _normalized_license_set(train_license_allowlist)
+    license_allowed = _license_allowed_for_train(resolved_license, allowlist)
+    default_train = default_train_eligible_for_source(
+        source_name or normalized_format,
+        normalized_format,
+    )
+    if train_eligible is True and not license_allowed:
+        raise ValueError(
+            f"license is not allowed for trainable public seeds: {resolved_license or '<missing>'}"
+        )
+    resolved_train_eligible = default_train if train_eligible is None else train_eligible
+    if not license_allowed:
+        resolved_train_eligible = False
+    resolved_task_family = (
+        _text_field(task_family).strip().lower().replace("-", "_")
+        or _text_field(record.get("task_family")).strip().lower().replace("-", "_")
+        or _infer_public_task_family(record, source_type)
+    )
+    resolved_source_method = (
+        _text_field(source_method).strip().lower().replace("-", "_")
+        or f"{source_type}_workspace"
+    )
+    command_groups = _public_command_groups(record, test_command_template)
+    hidden_tests = _flatten_command_groups(command_groups)
+    patch = _text_field(_first_present(record, ("patch", "reference_patch", "gold_patch")))
+    test_patch = _text_field(_first_present(record, ("test_patch", "tests_patch")))
+    verifier_types = _public_verifier_types(
+        record,
+        command_groups,
+        patch=patch,
+        test_patch=test_patch,
+    )
+    resolved_contamination_tags = sorted(
+        set(_list_field(record.get("contamination_tags")))
+        | set(contamination_tags or [])
+        | set(benchmark_contamination_tags(source_name or normalized_format, normalized_format))
+        | (set() if license_allowed else {"license_not_allowlisted"})
+    )
+    resolved_coverage_tags = _coverage_tags(
+        record,
+        resolved_task_family,
+        normalized_format,
+        repo,
+        verifier_types,
+        coverage_tags or [],
+    )
+    reference_artifacts = _public_reference_artifacts(
+        record,
+        source_name or normalized_format,
+        instance_id,
+        has_patch=bool(patch),
+        has_test_patch=bool(test_patch),
+    )
+    seed = QuerySeed(
+        public=PublicTaskContext(
+            query=query,
+            context=_public_issue_pr_context(record, instance_id, repo, source_type),
+            constraints=_list_field(record.get("constraints")),
+        ),
+        category=_text_field(record.get("category")) or "software_engineering",
+        difficulty=_difficulty(record),
+        provenance=f"{source_name or normalized_format}:{instance_id}",
+        license=resolved_license,
+        split=split,
+        task_family=resolved_task_family,
+        source_method=resolved_source_method,
+        train_eligible=resolved_train_eligible,
+        contamination_tags=resolved_contamination_tags,
+        verifier_types=verifier_types,
+        coverage_tags=resolved_coverage_tags,
+        metadata={
+            "source_adapter": "public_issue_pr",
+            "source_format": normalized_format,
+            "source_name": source_name or normalized_format,
+            "source_instance_id": instance_id,
+            "source_type": source_type,
+            "permitted_use": permitted_use,
+            "repository": repo,
+            "source_url": _public_source_url(record),
+        },
+    )
+    environment = EnvironmentSpec(
+        name=_environment_name(record, instance_id),
+        version=_text_field(record.get("version")) or "1",
+        description=f"Public {source_type.replace('_', ' ')} workspace for {instance_id}.",
+        image_digest=_image_reference(record),
+        source_uri=source_uri,
+        source_revision=revision,
+        working_directory=_text_field(record.get("working_directory")) or "/workspace",
+        setup_commands=_list_field(record.get("setup_commands")),
+        capability_packs=_list_field(record.get("capability_packs")),
+        network_policy=_text_field(record.get("network_policy")) or "disabled",
+        resource_limits=_dict_field(record.get("resource_limits")),
+        health_check=_list_field(record.get("health_check")),
+        reset_strategy=_text_field(record.get("reset_strategy")) or "recreate",
+        evaluator_refs=reference_artifacts,
+        metadata=_public_environment_metadata(
+            record,
+            normalized_format,
+            source_name or normalized_format,
+            source_type,
+            instance_id,
+            repo,
+            permitted_use,
+            resolved_license,
+            patch,
+            test_patch,
+        ),
+    )
+    evaluator = HiddenEvaluatorContext(
+        reference_artifacts=reference_artifacts,
+        hidden_tests=hidden_tests,
+        required_state=_dict_field(record.get("required_state")),
+        forbidden_state=_dict_field(record.get("forbidden_state")),
+        metadata={
+            "source_adapter": "public_issue_pr",
+            "source_format": normalized_format,
+            "source_name": source_name or normalized_format,
+            "source_instance_id": instance_id,
+            "source_type": source_type,
+            "command_groups": command_groups,
+            "patch_sha256": _sha256(patch),
+            "test_patch_sha256": _sha256(test_patch),
+            "patch_stored_as_reference": bool(patch),
+            "test_patch_stored_as_reference": bool(test_patch),
+        },
+    )
+    return Scenario(
+        query_seed=seed,
+        environment=environment,
+        hidden_evaluator=evaluator,
+        metadata={
+            "source_adapter": "public_issue_pr",
+            "source_format": normalized_format,
+            "source_name": source_name or normalized_format,
+            "source_instance_id": instance_id,
+            "source_type": source_type,
+        },
+    )
+
+
 def scenario_from_swe_style_record(
     record: dict[str, Any],
     *,
@@ -120,6 +393,11 @@ def scenario_from_swe_style_record(
     license_name: str = "",
     permitted_use: str = "research",
     test_command_template: str = "",
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] | None = None,
+    coverage_tags: Iterable[str] | None = None,
 ) -> Scenario:
     """Convert one SWE-bench-like record into a scenario without exposing gold patches."""
 
@@ -133,6 +411,33 @@ def scenario_from_swe_style_record(
     hidden_tests = _hidden_test_commands(fail_to_pass, test_command_template)
     patch = _text_field(_first_present(record, ("patch", "fix_patch", "gold_patch")))
     test_patch = _text_field(_first_present(record, ("test_patch", "tests_patch")))
+    resolved_task_family = (
+        _text_field(task_family).strip().lower().replace("-", "_")
+        or default_task_family_for_swe_record(record, normalized_format)
+    )
+    resolved_source_method = (
+        _text_field(source_method).strip().lower().replace("-", "_")
+        or default_source_method_for_swe_source(normalized_format)
+    )
+    resolved_train_eligible = (
+        default_train_eligible_for_source(source_name or normalized_format, normalized_format)
+        if train_eligible is None
+        else train_eligible
+    )
+    resolved_contamination_tags = sorted(
+        set(_list_field(record.get("contamination_tags")))
+        | set(contamination_tags or [])
+        | set(benchmark_contamination_tags(source_name or normalized_format, normalized_format))
+    )
+    verifier_types = _verifier_types(record, patch, test_patch, hidden_tests)
+    resolved_coverage_tags = _coverage_tags(
+        record,
+        resolved_task_family,
+        normalized_format,
+        repo,
+        verifier_types,
+        coverage_tags or [],
+    )
     reference_artifacts = _reference_artifacts(
         source_name or normalized_format,
         instance_id,
@@ -150,6 +455,12 @@ def scenario_from_swe_style_record(
         provenance=provenance,
         license=license_name or _text_field(record.get("license")),
         split=split,
+        task_family=resolved_task_family,
+        source_method=resolved_source_method,
+        train_eligible=resolved_train_eligible,
+        contamination_tags=resolved_contamination_tags,
+        verifier_types=verifier_types,
+        coverage_tags=resolved_coverage_tags,
         metadata={
             "source_adapter": "swe_style",
             "source_format": normalized_format,
@@ -212,6 +523,294 @@ def scenario_from_swe_style_record(
             "source_instance_id": instance_id,
         },
     )
+
+
+def _verifier_types(
+    record: dict[str, Any],
+    patch: str,
+    test_patch: str,
+    hidden_tests: list[str],
+) -> list[str]:
+    verifier_types = set(_list_field(record.get("verifier_types")))
+    if hidden_tests:
+        verifier_types.add("hidden_command")
+    if test_patch:
+        verifier_types.add("hidden_test_patch")
+    if patch:
+        verifier_types.add("reference_patch")
+    return sorted(verifier_types)
+
+
+def _coverage_tags(
+    record: dict[str, Any],
+    task_family: str,
+    source_format: str,
+    repo: str,
+    verifier_types: list[str],
+    extra_tags: Iterable[str],
+) -> list[str]:
+    tags = set(_list_field(record.get("coverage_tags"))) | set(extra_tags)
+    tags.add(f"task_family:{task_family}")
+    tags.add(f"source_format:{source_format}")
+    for verifier_type in verifier_types:
+        tags.add(f"verifier:{verifier_type}")
+    if repo:
+        tags.add(f"repo:{repo}")
+    language = _text_field(record.get("language"))
+    if language:
+        tags.add(f"language:{language}")
+    return sorted(tags)
+
+
+def _public_source_type(record: dict[str, Any], source_format: str) -> str:
+    explicit = _text_field(
+        _first_present(record, ("source_type", "record_type", "type", "kind"))
+    ).lower()
+    if explicit in {"issue", "public_issue"}:
+        return "public_issue"
+    if explicit in {"pr", "pull_request", "public_pr"}:
+        return "public_pr"
+    if source_format in {"public_issue", "public_pr"}:
+        return source_format
+    if "pull_request" in record or "pull_request_url" in record or "merged_at" in record:
+        return "public_pr"
+    return "public_issue"
+
+
+def _public_instance_id(record: dict[str, Any], source_type: str) -> str:
+    value = _first_present(
+        record,
+        (
+            "source_instance_id",
+            "instance_id",
+            "task_id",
+            "node_id",
+            "issue_id",
+            "pull_request_id",
+            "id",
+        ),
+    )
+    repo = _repo_name(record).replace("/", "__")
+    number = _text_field(_first_present(record, ("number", "issue_number", "pr_number")))
+    if value is None and repo and number:
+        short_type = "pr" if source_type == "public_pr" else "issue"
+        value = f"{repo}-{short_type}-{number}"
+    if value is None:
+        value = _public_source_url(record)
+    instance_id = _text_field(value)
+    if not instance_id:
+        raise ValueError("missing public issue/PR source instance id")
+    return instance_id
+
+
+def _public_issue_pr_context(
+    record: dict[str, Any],
+    instance_id: str,
+    repo: str,
+    source_type: str,
+) -> dict[str, Any]:
+    context = _public_context(record, instance_id, repo)
+    context["source_type"] = source_type
+    labels = _list_field(record.get("labels"))
+    if labels:
+        context["labels"] = labels
+    source_url = _public_source_url(record)
+    if source_url:
+        context["source_url"] = source_url
+    return context
+
+
+def _public_source_url(record: dict[str, Any]) -> str:
+    return _text_field(
+        _first_present(
+            record,
+            (
+                "source_url",
+                "html_url",
+                "issue_url",
+                "pull_request_url",
+                "url",
+            ),
+        )
+    )
+
+
+def _fixed_source_revision(record: dict[str, Any]) -> str:
+    revision = _source_revision(record)
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise ValueError("public issue/PR import requires a 40-character fixed source revision")
+    return revision.lower()
+
+
+def _normalized_license_set(values: Iterable[str]) -> set[str]:
+    return {_normalize_license(value) for value in values if _normalize_license(value)}
+
+
+def _normalize_license(value: Any) -> str:
+    return _text_field(value).lower().replace("-", "_").replace(" ", "_")
+
+
+def _license_allowed_for_train(license_name: str, allowlist: set[str]) -> bool:
+    normalized = _normalize_license(license_name)
+    return bool(normalized and normalized in allowlist)
+
+
+def _infer_public_task_family(record: dict[str, Any], source_type: str) -> str:
+    labels = {_normalize_task_label(value) for value in _list_field(record.get("labels"))}
+    query_tokens = set(
+        _normalize_task_label(value)
+        for value in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", _query_text(record))
+    )
+    signals = labels | query_tokens
+    mapping = (
+        ("code_review", {"review", "comments", "requested_changes"}),
+        ("security_hardening", {"security", "vulnerability", "cve", "xss", "injection"}),
+        ("performance", {"performance", "perf", "slow", "latency", "benchmark"}),
+        ("dependency_upgrade", {"dependency", "dependencies", "upgrade", "deps"}),
+        ("migration", {"migration", "migrate", "schema"}),
+        ("docs_examples", {"docs", "documentation", "example", "examples", "readme"}),
+        ("ci_build", {"ci", "build", "packaging", "lint", "typing", "workflow"}),
+        ("test_authoring", {"test", "tests", "coverage", "flaky"}),
+        ("refactor", {"refactor", "cleanup", "simplify"}),
+        ("feature_implementation", {"feature", "enhancement", "api"}),
+        ("bug_repair", {"bug", "regression", "defect", "fix", "crash"}),
+        ("repo_understanding", {"question", "help", "explain", "investigate"}),
+    )
+    for family, terms in mapping:
+        if signals.intersection(terms):
+            return family
+    if source_type == "public_pr":
+        return "code_review"
+    return "bug_repair"
+
+
+def _normalize_task_label(value: Any) -> str:
+    return _text_field(value).lower().replace("-", "_").replace(" ", "_")
+
+
+def _public_command_groups(
+    record: dict[str, Any],
+    test_command_template: str,
+) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    _add_command_group(
+        groups,
+        "hidden_command",
+        _list_field(_first_present(record, ("hidden_tests", "test_commands", "eval_commands"))),
+    )
+    test_ids = _list_field(
+        _first_present(record, ("FAIL_TO_PASS", "fail_to_pass", "test_ids"))
+    )
+    _add_command_group(
+        groups,
+        "hidden_command",
+        _hidden_test_commands(test_ids, test_command_template),
+    )
+    _add_command_group(groups, "build_command", _list_field(record.get("build_commands")))
+    _add_command_group(groups, "example_command", _list_field(record.get("example_commands")))
+    _add_command_group(groups, "doctest", _list_field(record.get("doctest_commands")))
+    _add_command_group(groups, "benchmark_command", _list_field(record.get("benchmark_commands")))
+    _add_command_group(groups, "adversarial_test", _list_field(record.get("adversarial_tests")))
+    return {key: value for key, value in sorted(groups.items()) if value}
+
+
+def _add_command_group(
+    groups: dict[str, list[str]],
+    verifier_type: str,
+    commands: Iterable[str],
+) -> None:
+    seen = set(groups.get(verifier_type, []))
+    for command in commands:
+        if command and command not in seen:
+            groups.setdefault(verifier_type, []).append(command)
+            seen.add(command)
+
+
+def _flatten_command_groups(groups: dict[str, list[str]]) -> list[str]:
+    commands: list[str] = []
+    seen: set[str] = set()
+    for group_commands in groups.values():
+        for command in group_commands:
+            if command not in seen:
+                commands.append(command)
+                seen.add(command)
+    return commands
+
+
+def _public_verifier_types(
+    record: dict[str, Any],
+    command_groups: dict[str, list[str]],
+    *,
+    patch: str,
+    test_patch: str,
+) -> list[str]:
+    verifier_types = set(_list_field(record.get("verifier_types")))
+    verifier_types.update(command_groups)
+    if _dict_field(record.get("required_state")):
+        verifier_types.add("required_state")
+    if _dict_field(record.get("forbidden_state")):
+        verifier_types.add("forbidden_state")
+    if _list_field(record.get("diff_constraints")):
+        verifier_types.add("diff_constraint")
+    if record.get("performance_threshold") is not None:
+        verifier_types.add("performance_threshold")
+    if patch:
+        verifier_types.add("reference_patch")
+    if test_patch:
+        verifier_types.add("hidden_test_patch")
+    return sorted(_normalize_task_label(value) for value in verifier_types)
+
+
+def _public_reference_artifacts(
+    record: dict[str, Any],
+    source_name: str,
+    instance_id: str,
+    *,
+    has_patch: bool,
+    has_test_patch: bool,
+) -> list[str]:
+    artifacts = set(_list_field(record.get("reference_artifacts")))
+    artifacts.update(
+        _reference_artifacts(
+            source_name,
+            instance_id,
+            has_patch=has_patch,
+            has_test_patch=has_test_patch,
+        )
+    )
+    return sorted(artifacts)
+
+
+def _public_environment_metadata(
+    record: dict[str, Any],
+    source_format: str,
+    source_name: str,
+    source_type: str,
+    instance_id: str,
+    repo: str,
+    permitted_use: str,
+    license_name: str,
+    patch: str,
+    test_patch: str,
+) -> dict[str, Any]:
+    metadata = {
+        "source_adapter": "public_issue_pr",
+        "source_format": source_format,
+        "source_name": source_name,
+        "source_instance_id": instance_id,
+        "source_type": source_type,
+        "permitted_use": permitted_use,
+        "license": license_name,
+        "source_url": _public_source_url(record),
+        "patch_sha256": _sha256(patch),
+        "test_patch_sha256": _sha256(test_patch),
+    }
+    if repo:
+        metadata["repository"] = repo
+    language = _text_field(record.get("language"))
+    if language:
+        metadata["language"] = language
+    return {key: value for key, value in metadata.items() if value != ""}
 
 
 def _normalize_source_format(value: str) -> str:

@@ -60,12 +60,29 @@ The first production-capable release must:
 - [x] DeepSeek V4 Flash and generic local OpenAI-compatible provider validation
 - [x] Three-tier synthesis workflow separating smoke, complex synthetic, and registry-backed data
 - [x] Real SWE-bench Lite seed preparation with fixed-commit repository cloning
+- [x] Comprehensive seed metadata for task family, source method, train eligibility,
+  contamination tags, verifier types, and coverage tags
+- [x] Seed-library audit command for coverage and benchmark-contamination checks
+- [x] Seed-library scale-up gates for trainable-pool coverage budgets and seed-level held-out
+  overlap checks
+- [x] Non-benchmark public issue/PR seed import with license allowlists and fixed-revision
+  workspace requirements
+- [x] Per-family verifier templates and seed-audit evidence requirements
+- [x] Repository-grounded synthetic seed generation for test authoring, refactoring, dependency
+  upgrades, migrations, docs/examples, security hardening, performance, CI/build repair, code
+  review, and repo-understanding tasks
+- [x] Scenario-level decontamination reports for held-out tests, reference artifacts, oracle hashes,
+  and source instances
+- [x] Stratified human-review queue generation by task family, difficulty, source method, and
+  verifier type
+- [x] Registry-backed smoke rollout coverage for every supported task family in
+  `tests/test_seed_library_rollouts.py`
 
 The core P0-P4 architecture and the P5 scheduler are implemented. Production integration remains
 for registry health checks, independent resource gates, call caching, hard budget admission,
-quality-report commands, and review sampling. The lightweight `AgentRunner` pipeline remains as a
-dependency-free demonstration path, while `HeadlessAgent` is the scenario-bound runtime for
-sandboxed coding trajectories.
+quality-report commands, and production seed-corpus population. The
+lightweight `AgentRunner` pipeline remains as a dependency-free demonstration path, while
+`HeadlessAgent` is the scenario-bound runtime for sandboxed coding trajectories.
 
 ## Architecture Boundaries
 
@@ -197,6 +214,11 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [x] Add external SWE-style JSON/JSONL import for paired query and workspace seed records.
 - [x] Add SWE-bench Lite preparation that fetches real seed records and clones repositories at
   fixed commits before registry-backed agent runs.
+- [x] Mark known benchmark imports as non-training seeds and attach contamination metadata.
+- [x] Track task family, source construction method, verifier types, and coverage tags on each
+  query seed.
+- [x] Add a seed-library audit CLI for task coverage, source coverage, train eligibility, verifier
+  coverage, and benchmark-contamination failures.
 - [x] Execute environment setup commands before registry-backed agent runs so real workspaces can
   be initialized offline from prebuilt images.
 - [x] Add semantic and exact duplicate detection hooks.
@@ -335,6 +357,108 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - Infrastructure failures are separately measurable and do not become negative training labels.
 - A release manifest can reproduce the complete scenario and evaluation configuration.
 
+## P6: Comprehensive Task Seed Library
+
+**Goal:** Build a broad, auditable seed library for code-agent training without contaminating
+held-out benchmarks.
+
+### Tasks
+
+- [x] Promote task family, source method, train eligibility, contamination tags, verifier types, and
+  coverage tags into the query-seed contract.
+- [x] Add seed-library audit reports for family distribution, source distribution, verifier
+  distribution, coverage tags, and benchmark contamination.
+- [x] Treat SWE-bench Lite and other known benchmark-style sources as validation or evaluation
+  inputs by default rather than train seeds.
+- [x] Add seed-level coverage budgets that fail scale-up when one task family, repository,
+  language, or source method dominates the trainable pool.
+- [x] Add seed-level decontamination checks comparing trainable seeds against held-out query text,
+  provenance, source instance, and repository overlap.
+- [x] Add non-benchmark public issue and PR importers with license allowlists and fixed-revision
+  workspaces.
+- [x] Add repository-grounded synthetic seed generators for test authoring, refactoring,
+  dependency upgrades, migrations, docs/examples, security hardening, performance, CI/build repair,
+  code review, and repo-understanding tasks.
+- [x] Add per-family verifier templates and minimum evidence requirements.
+- [x] Add scenario-level benchmark decontamination reports comparing trainable trajectories against
+  held-out tests and reference artifacts.
+- [x] Add sampled human-review queues stratified by task family, difficulty, source method, and
+  verifier type.
+- [x] Add registry-backed smoke rollout evidence for every supported task family, including
+  trace-quality evaluation for repository-understanding tasks.
+
+### Deliverables
+
+- Multi-family seed adapters and generators
+- Seed-library quality and contamination reports
+- Train/dev/eval partition policy that keeps benchmarks measurable
+
+### Exit Criteria
+
+- Trainable seeds come only from licensed, non-benchmark, reproducible sources or verified
+  repository-grounded synthesis.
+- Each supported task family has executable verifier evidence and at least one end-to-end
+  registry-backed rollout.
+- Seed-library audits block scale-up when benchmark contamination, license gaps, verifier gaps, or
+  severe coverage imbalance are detected.
+- Seed-library decontamination blocks trainable seeds that duplicate held-out query text,
+  provenance, or source instances.
+
+## P7: Production Seed Corpus Population
+
+**Goal:** Populate a production-scale, non-benchmark, auditable train seed registry that can drive
+larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark evaluation.
+
+### Tasks
+
+- [ ] Define the first production seed-corpus target size, per-family minimum counts, per-language
+  targets, and maximum repository/source shares before collecting data.
+- [ ] Build a repository allowlist from permissively licensed, active public repositories with
+  reproducible Git history, stable test commands, and no benchmark overlap.
+- [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
+  labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
+  source-instance IDs.
+- [ ] Reject or quarantine records with missing licenses, mutable revisions, missing source URIs,
+  personal data, credentials, private URLs, or benchmark contamination signals.
+- [ ] Generate repository-grounded synthetic tasks for under-covered task families using fixed
+  repository snapshots and family-appropriate verifier evidence.
+- [ ] Materialize the corpus into `runs/train-registry` or an explicitly configured external data
+  root using the registry importer and repository synthesis generator.
+- [ ] Build an evaluation/holdout registry from benchmark and curated non-train sources, keeping
+  evaluator oracles out of trainable seed prompts and public traces.
+- [ ] Run `registry seed-audit` with production coverage gates for all supported task families,
+  verifier types, repository shares, source-method shares, language shares, and minimum trainable
+  seed count.
+- [ ] Run `registry scenario-audit` against the holdout registry to block hidden-test, reference
+  artifact, oracle-hash, and source-instance overlap.
+- [ ] Generate a stratified human-review queue and record reviewer decisions for sampled seeds
+  before approving large provider spend.
+- [ ] Run a small registry-backed pilot across all task families, then use batch quality reports,
+  trace-logic audits, and scale-readiness checks before launching larger shards.
+- [ ] Freeze a seed-corpus manifest with registry root, source snapshots, prompt/config versions,
+  audit outputs, review sample path, and approved scale-up decision.
+
+### Deliverables
+
+- Production train seed registry with licensed non-benchmark public and synthetic seeds
+- Holdout/evaluation registry for contamination checks and downstream measurement
+- Seed-corpus manifest, quality reports, decontamination reports, and review queue outputs
+- Scale-up decision artifact for DeepSeek V4 Pro shard execution
+
+### Exit Criteria
+
+- The train registry satisfies the configured family, verifier, language, source, and repository
+  coverage budgets.
+- Every trainable seed traces to a license-compatible source, fixed revision, and reproducible
+  workspace specification.
+- Seed and scenario decontamination reports pass against all configured holdout and benchmark
+  registries.
+- Human review approves the sampled seed queue or quarantines every actionable issue.
+- A pilot run produces enough successful registry-backed trajectories to justify larger shard
+  synthesis under the configured budget gates.
+- The release manifest can reproduce the exact seed registry, audit outputs, review sample, pilot
+  selection, and scale-up decision.
+
 ## Deferred Work
 
 - `DEFERRED` General desktop and GUI automation
@@ -358,6 +482,8 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 ### Data Governance
 
 - [x] Record source, license, permitted use, and provenance for every seed.
+- [x] Record task family, source construction method, training eligibility, contamination tags,
+  verifier types, and coverage tags for seed-library audits.
 - [x] Define retention and deletion behavior for traces and artifacts.
 - [x] Add redaction checks for credentials and personal data.
 - [x] Maintain immutable train, validation, and evaluation split assignments.

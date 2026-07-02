@@ -1,0 +1,53 @@
+{
+  "repositories": [
+    {
+      "repository": "example/tool",
+      "source_uri": "https://github.com/example/tool.git",
+      "source_revision": "2222222222222222222222222222222222222222",
+      "license": "MIT",
+      "language": "Python",
+      "image_digest": "python@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "working_directory": "/workspace",
+      "setup_commands": ["python -m pip install -e ."],
+      "task_families": [
+        "feature_implementation",
+        "test_authoring",
+        "refactor",
+        "dependency_upgrade",
+        "migration",
+        "docs_examples",
+        "security_hardening",
+        "performance",
+        "ci_build",
+        "code_review",
+        "repo_understanding"
+      ],
+      "targets": [
+        {
+          "name": "parser",
+          "paths": ["src/tool/parser.py", "tests/test_parser.py"],
+          "test_commands": ["python -m pytest tests/test_parser.py"],
+          "build_commands": ["python -m build"],
+          "ci_commands": ["python -m pytest", "python -m build"],
+          "doctest_commands": ["python -m doctest README.md"],
+          "example_commands": ["python examples/parser_demo.py"],
+          "benchmark_commands": ["python benchmarks/parser_bench.py --max-ms 50"],
+          "adversarial_tests": ["python -m pytest tests/security/test_parser.py"],
+          "migration_commands": ["python scripts/check_migration.py"],
+          "required_state": {
+            "file_contains": {
+              "src/tool/parser.py": "DONE"
+            }
+          },
+          "diff_constraints": ["do not rename the public Parser API"],
+          "performance_threshold": {
+            "max_ms": 50
+          },
+          "retrieval_requirements": ["src/tool/parser.py"],
+          "trace_quality_rubric": ["cite src/tool/parser.py in the final answer"],
+          "difficulty": 3
+        }
+      ]
+    }
+  ]
+}

@@ -32,6 +32,7 @@ from easy_agentic_data.evaluation import (
     HiddenCommandEvaluator,
     HiddenTestPatchEvaluator,
     RequiredStateEvaluator,
+    TraceRequirementEvaluator,
     apply_agent_termination,
     derive_turn_rewards,
     evaluation_result_metrics,
@@ -51,8 +52,29 @@ from easy_agentic_data.real_seed_sources import (
     prepare_real_seed_registry,
 )
 from easy_agentic_data.registry import ScenarioRegistry, materialize_environment_source
-from easy_agentic_data.registry_sources import import_swe_style_records, load_source_records
+from easy_agentic_data.repository_synthetic import (
+    DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST,
+    generate_repository_synthetic_scenarios,
+    load_repository_synthesis_specs,
+)
+from easy_agentic_data.registry_sources import (
+    DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+    PUBLIC_ISSUE_PR_FORMATS,
+    import_public_issue_pr_records,
+    import_swe_style_records,
+    load_source_records,
+)
 from easy_agentic_data.sandbox import DockerSandbox, SandboxLimits
+from easy_agentic_data.scenario_decontamination import (
+    audit_scenario_decontamination,
+    scenarios_from_registry,
+)
+from easy_agentic_data.seed_library import (
+    DEFAULT_BENCHMARK_SOURCE_ALIASES,
+    SeedLibraryPolicy,
+    audit_seed_library,
+)
+from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
 from easy_agentic_data.tools import default_tool_registry
@@ -86,6 +108,12 @@ def build_llm_client(config: PipelineConfig):
         return LocalOpenAICompatibleClient(config.llm)
     else:
         raise ValueError(f"Unsupported LLM provider: {config.llm.provider}")
+
+
+def _parse_train_eligible(value: str) -> bool | None:
+    if value == "auto":
+        return None
+    return value == "true"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -183,6 +211,49 @@ def main(argv: Sequence[str] | None = None) -> int:
     for command in ("list", "validate"):
         item = registry_subparsers.add_parser(command)
         item.add_argument("--root", required=True)
+    audit_parser = registry_subparsers.add_parser("seed-audit")
+    audit_parser.add_argument("--root", required=True)
+    audit_parser.add_argument("--output", default="")
+    audit_parser.add_argument(
+        "--benchmark-source",
+        action="append",
+        default=[],
+        help="Additional source alias treated as evaluation benchmark contamination",
+    )
+    audit_parser.add_argument(
+        "--holdout-root",
+        action="append",
+        default=[],
+        help="Additional registry root whose non-train or benchmark seeds are held out",
+    )
+    audit_parser.add_argument("--min-train-eligible", type=int, default=0)
+    audit_parser.add_argument("--require-task-family", action="append", default=[])
+    audit_parser.add_argument("--require-verifier-type", action="append", default=[])
+    audit_parser.add_argument("--max-task-family-share", type=float, default=1.0)
+    audit_parser.add_argument("--max-source-method-share", type=float, default=1.0)
+    audit_parser.add_argument("--max-repository-share", type=float, default=1.0)
+    audit_parser.add_argument("--max-language-share", type=float, default=1.0)
+    scenario_audit_parser = registry_subparsers.add_parser("scenario-audit")
+    scenario_audit_parser.add_argument("--root", required=True)
+    scenario_audit_parser.add_argument("--output", default="")
+    scenario_audit_parser.add_argument(
+        "--benchmark-source",
+        action="append",
+        default=[],
+        help="Additional source alias treated as evaluation benchmark contamination",
+    )
+    scenario_audit_parser.add_argument(
+        "--holdout-root",
+        action="append",
+        default=[],
+        help="Additional registry root whose non-train or benchmark scenarios are held out",
+    )
+    review_queue_parser = registry_subparsers.add_parser("review-queue")
+    review_queue_parser.add_argument("--root", required=True)
+    review_queue_parser.add_argument("--output", default="")
+    review_queue_parser.add_argument("--sample-per-stratum", type=int, default=1)
+    review_queue_parser.add_argument("--max-records", type=int)
+    review_queue_parser.add_argument("--overwrite", action="store_true")
     inspect_parser = registry_subparsers.add_parser("inspect")
     inspect_parser.add_argument("--root", required=True)
     inspect_parser.add_argument("--scenario-id", required=True)
@@ -196,17 +267,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     import_parser.add_argument(
         "--format",
         default="auto",
-        choices=["auto", "swe-bench", "swe-smith", "multi-swe"],
+        choices=[
+            "auto",
+            "swe-bench",
+            "swe-smith",
+            "multi-swe",
+            "public-issue",
+            "public-pr",
+            "public-issue-pr",
+        ],
         help="External source record shape",
     )
     import_parser.add_argument("--source-name", default="")
     import_parser.add_argument(
         "--split",
         default="train",
-        choices=["train", "validation", "evaluation"],
+        choices=["train", "validation", "evaluation", "dev", "eval_holdout", "quarantined"],
     )
     import_parser.add_argument("--license", default="")
     import_parser.add_argument("--permitted-use", default="research")
+    import_parser.add_argument(
+        "--task-family",
+        default="",
+        help="Task family such as bug_repair, test_authoring, refactor, migration, or docs",
+    )
+    import_parser.add_argument(
+        "--source-method",
+        default="",
+        help=(
+            "Source construction method such as external_issue_workspace "
+            "or synthetic_issue_workspace"
+        ),
+    )
+    import_parser.add_argument(
+        "--train-eligible",
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Whether imported seeds may be used for training; auto blocks known benchmarks",
+    )
+    import_parser.add_argument(
+        "--contamination-tag",
+        action="append",
+        default=[],
+        help="Additional contamination or holdout tag to attach to every imported seed",
+    )
+    import_parser.add_argument(
+        "--coverage-tag",
+        action="append",
+        default=[],
+        help="Additional coverage tag to attach to every imported seed",
+    )
+    import_parser.add_argument(
+        "--allow-train-license",
+        action="append",
+        default=[],
+        help="Additional license identifier allowed for train-eligible public issue/PR seeds",
+    )
     import_parser.add_argument("--limit", type=int)
     import_parser.add_argument(
         "--test-command-template",
@@ -217,6 +333,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--strict",
         action="store_true",
         help="Fail on the first malformed source record",
+    )
+    synthetic_parser = registry_subparsers.add_parser("generate-synthetic")
+    synthetic_parser.add_argument("--root", required=True)
+    synthetic_parser.add_argument(
+        "--source",
+        required=True,
+        help="Local JSON or JSONL repository synthesis spec",
+    )
+    synthetic_parser.add_argument("--source-name", default="repository_synthetic")
+    synthetic_parser.add_argument(
+        "--split",
+        default="train",
+        choices=["train", "validation", "evaluation", "dev", "eval_holdout", "quarantined"],
+    )
+    synthetic_parser.add_argument(
+        "--task-family",
+        action="append",
+        default=[],
+        help="Task family to generate; repeat to select multiple families",
+    )
+    synthetic_parser.add_argument(
+        "--train-eligible",
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Whether generated seeds may be used for training",
+    )
+    synthetic_parser.add_argument(
+        "--allow-train-license",
+        action="append",
+        default=[],
+        help="Additional license identifier allowed for train-eligible synthetic seeds",
+    )
+    synthetic_parser.add_argument("--limit", type=int)
+    synthetic_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on the first repository synthesis issue",
     )
     agent_parser = subparsers.add_parser("agent-run", help="Run one registry scenario in Docker")
     agent_parser.add_argument("--registry", required=True)
@@ -409,17 +562,129 @@ def main(argv: Sequence[str] | None = None) -> int:
                 random_seed=args.random_seed,
             )
             print(json.dumps(instance.to_dict(), indent=2))
+        elif args.registry_command == "seed-audit":
+            benchmark_sources = sorted(
+                set(DEFAULT_BENCHMARK_SOURCE_ALIASES) | set(args.benchmark_source)
+            )
+            seeds = registry.list_seeds()
+            holdout_seeds = list(seeds)
+            for root in args.holdout_root:
+                holdout_seeds.extend(ScenarioRegistry(root).list_seeds())
+            policy = SeedLibraryPolicy(
+                min_train_eligible=args.min_train_eligible,
+                required_task_families=args.require_task_family,
+                required_verifier_types=args.require_verifier_type,
+                max_task_family_share=args.max_task_family_share,
+                max_source_method_share=args.max_source_method_share,
+                max_repository_share=args.max_repository_share,
+                max_language_share=args.max_language_share,
+            )
+            audit = audit_seed_library(
+                seeds,
+                benchmark_sources=benchmark_sources,
+                policy=policy,
+                holdout_seeds=holdout_seeds,
+            )
+            payload = audit.to_dict()
+            if args.output:
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if audit.valid else 2
+        elif args.registry_command == "scenario-audit":
+            benchmark_sources = sorted(
+                set(DEFAULT_BENCHMARK_SOURCE_ALIASES) | set(args.benchmark_source)
+            )
+            scenarios = scenarios_from_registry(registry)
+            holdout_scenarios = list(scenarios)
+            for root in args.holdout_root:
+                holdout_scenarios.extend(scenarios_from_registry(ScenarioRegistry(root)))
+            audit = audit_scenario_decontamination(
+                scenarios,
+                benchmark_sources=benchmark_sources,
+                holdout_scenarios=holdout_scenarios,
+            )
+            payload = audit.to_dict()
+            if args.output:
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if audit.valid else 2
+        elif args.registry_command == "review-queue":
+            queue = build_seed_review_queue(
+                scenarios_from_registry(registry),
+                sample_per_stratum=args.sample_per_stratum,
+                max_records=args.max_records,
+            )
+            payload = queue.to_dict()
+            if args.output:
+                output = Path(args.output)
+                if args.overwrite:
+                    output.unlink(missing_ok=True)
+                for record in queue.records:
+                    enqueue_human_review(output, record)
+            print(json.dumps(payload, indent=2, sort_keys=True))
         elif args.registry_command == "import":
-            summary = import_swe_style_records(
+            records = load_source_records(args.source)
+            source_format = args.format.replace("-", "_")
+            train_eligible = _parse_train_eligible(args.train_eligible)
+            if source_format in PUBLIC_ISSUE_PR_FORMATS:
+                summary = import_public_issue_pr_records(
+                    registry,
+                    records,
+                    source_format=args.format,
+                    source_name=args.source_name,
+                    split=args.split,
+                    license_name=args.license,
+                    permitted_use=args.permitted_use,
+                    limit=args.limit,
+                    test_command_template=args.test_command_template,
+                    task_family=args.task_family,
+                    source_method=args.source_method,
+                    train_eligible=train_eligible,
+                    contamination_tags=args.contamination_tag,
+                    coverage_tags=args.coverage_tag,
+                    train_license_allowlist=sorted(
+                        set(DEFAULT_TRAIN_LICENSE_ALLOWLIST) | set(args.allow_train_license)
+                    ),
+                    strict=args.strict,
+                )
+            else:
+                summary = import_swe_style_records(
+                    registry,
+                    records,
+                    source_format=args.format,
+                    source_name=args.source_name,
+                    split=args.split,
+                    license_name=args.license,
+                    permitted_use=args.permitted_use,
+                    limit=args.limit,
+                    test_command_template=args.test_command_template,
+                    task_family=args.task_family,
+                    source_method=args.source_method,
+                    train_eligible=train_eligible,
+                    contamination_tags=args.contamination_tag,
+                    coverage_tags=args.coverage_tag,
+                    strict=args.strict,
+                )
+            print(json.dumps(summary.to_dict(), indent=2))
+        elif args.registry_command == "generate-synthetic":
+            summary = generate_repository_synthetic_scenarios(
                 registry,
-                load_source_records(args.source),
-                source_format=args.format,
+                load_repository_synthesis_specs(args.source),
                 source_name=args.source_name,
                 split=args.split,
-                license_name=args.license,
-                permitted_use=args.permitted_use,
+                task_families=args.task_family,
+                train_eligible=_parse_train_eligible(args.train_eligible),
+                train_license_allowlist=sorted(
+                    set(DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST)
+                    | set(args.allow_train_license)
+                ),
                 limit=args.limit,
-                test_command_template=args.test_command_template,
                 strict=args.strict,
             )
             print(json.dumps(summary.to_dict(), indent=2))
@@ -880,8 +1145,9 @@ def _run_registry_scenario(
                     ask_user=user_callback(user, instance),
                     finalize=False,
                 )
-                evaluators = _deterministic_evaluators(instance)
-                turn_rewards = derive_turn_rewards(load_trace(trace_path), instance)
+                trace = load_trace(trace_path)
+                evaluators = _deterministic_evaluators(instance, trace)
+                turn_rewards = derive_turn_rewards(trace, instance)
                 diagnostics = {
                     "turns": float(run_result.turns),
                     "tool_calls": float(run_result.tool_calls),
@@ -919,7 +1185,7 @@ def _run_registry_scenario(
             sandbox.destroy()
 
 
-def _deterministic_evaluators(instance):
+def _deterministic_evaluators(instance, trace=None):
     evaluators = []
     if instance.hidden_evaluator.metadata.get("test_patch"):
         evaluators.append(HiddenTestPatchEvaluator())
@@ -931,6 +1197,16 @@ def _deterministic_evaluators(instance):
         evaluators.append(RequiredStateEvaluator())
     if instance.hidden_evaluator.forbidden_state:
         evaluators.append(ForbiddenStateEvaluator())
+    retrieval_requirements = instance.hidden_evaluator.metadata.get("retrieval_requirements", [])
+    trace_quality_rubric = instance.hidden_evaluator.metadata.get("trace_quality_rubric", [])
+    if retrieval_requirements or trace_quality_rubric:
+        evaluators.append(
+            TraceRequirementEvaluator(
+                trace,
+                retrieval_requirements=retrieval_requirements,
+                trace_quality_rubric=trace_quality_rubric,
+            )
+        )
     return evaluators
 
 

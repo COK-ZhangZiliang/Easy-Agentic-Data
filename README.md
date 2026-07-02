@@ -11,11 +11,12 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-83%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-141%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
 [Why Not Existing Agents](#why-not-use-an-existing-agent-framework) ·
+[Task Seeds](#task-seed-library) ·
 [Local Models](#local-llm-api) · [Documentation](#documentation)
 
 </div>
@@ -86,6 +87,144 @@ format.
 
 In short, existing agents can be plugged in as workers when they can provide enough observable
 events, but the durable product is the reproducible scenario, trace, verifier, and export pipeline.
+
+## Task Seed Library
+
+The task seed library is a first-class part of the data factory, not a thin wrapper around one
+benchmark. Each seed records the public task, hidden user context, source lineage, license,
+permitted use, split, task family, source construction method, training eligibility, contamination
+tags, verifier types, and coverage tags. This makes the seed set auditable before any paid rollout
+starts.
+
+Benchmark datasets such as SWE-bench Lite are treated as validation or evaluation sources by
+default. They may be useful for smoke runs, verifier development, or held-out measurement, but they
+must not silently enter the training seed pool. Importers therefore mark known benchmark sources as
+`train_eligible=false` and attach contamination tags such as `benchmark_source`.
+
+The library is designed to cover the broader code-agent task space:
+
+| Task family | Examples | Primary verifier signal |
+| --- | --- | --- |
+| `bug_repair` | Failing issue, regression, runtime error | Hidden command, hidden test patch |
+| `feature_implementation` | Add a small API, CLI flag, UI state, or data path | Tests and required state |
+| `test_authoring` | Add missing unit/integration tests for existing behavior | Test diff and coverage checks |
+| `refactor` | Improve structure while preserving behavior | Existing tests and forbidden changes |
+| `dependency_upgrade` | Adapt code to a new library/runtime version | Build, import, and compatibility tests |
+| `migration` | Move config, schema, framework, or file layout | Required state and migration checks |
+| `security_hardening` | Close injection, path traversal, or secret-handling gaps | Adversarial tests |
+| `performance` | Remove algorithmic or I/O bottlenecks | Bounded benchmark or metric threshold |
+| `docs_examples` | Repair docs, examples, notebooks, or API snippets | Executable examples or doctests |
+| `ci_build` | Fix packaging, lint, type-check, or workflow failures | Reproduced command success |
+| `code_review` | Address review comments without hidden patch leakage | Targeted tests and diff constraints |
+| `repo_understanding` | Locate behavior, explain state, or plan a safe edit | Trace-quality and retrieval evidence |
+
+The recommended source mix is layered:
+
+- **Non-benchmark real repositories**: public issues, PRs, commits, CI failures, release migrations,
+  and review threads with compatible licenses and reproducible checkouts.
+- **Repository-grounded synthetic tasks**: mutation testing, fixture perturbations, generated issues,
+  dependency bumps, and doc/example breakages whose solvability is proven by execution.
+- **Directed risk tasks**: security, flaky-test, packaging, and long-context tasks synthesized to
+  cover rare but valuable agent behaviors.
+- **Held-out benchmarks**: benchmark-derived seeds stay in validation or evaluation partitions for
+  measurement and contamination checks.
+
+Use the registry importer to label seeds at ingestion time, then audit the library before running a
+batch:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
+  --root runs/registry \
+  --source seeds.jsonl \
+  --format swe-bench \
+  --source-name curated-nonbenchmark-issues \
+  --task-family test-authoring \
+  --source-method curated_issue_workspace \
+  --train-eligible true \
+  --license MIT
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-audit \
+  --root runs/registry \
+  --output runs/registry/seed-audit.json
+```
+
+For trainable non-benchmark seeds, prefer local exports of public issue and PR records rather than
+benchmark rows. The importer requires a fixed 40-character source revision, records the public
+repository and license, keeps reference patches and evaluator commands hidden, and only marks a
+seed train-eligible when its license is in the permissive allowlist:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
+  --root runs/train-registry \
+  --source examples/public-issue-pr-seeds.jsonl \
+  --format public-issue-pr \
+  --source-name curated-public-issues \
+  --train-eligible auto \
+  --allow-train-license Apache-2.0
+```
+
+Repository-grounded synthetic seeds use a local synthesis spec rather than benchmark rows. The
+default generator creates task seeds for test authoring, refactoring, dependency upgrades,
+migrations, docs/examples, security hardening, performance, CI/build repair, code review, and
+repo-understanding. Each generated seed must have family-appropriate verifier evidence such as
+tests, build commands, doctests, adversarial tests, benchmark thresholds, diff constraints, or
+retrieval requirements:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry generate-synthetic \
+  --root runs/train-registry \
+  --source examples/repository-synthesis.json \
+  --source-name curated-repository-synthetic
+```
+
+The sample files under `examples/` define the source-record contract. Replace the placeholder
+repository URI and fixed revision with licensed, reproducible repository snapshots before running
+production agent rollouts.
+
+Scale-up audits can also enforce coverage budgets and compare trainable seeds against held-out
+registries before a batch run:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-audit \
+  --root runs/train-registry \
+  --holdout-root runs/eval-registry \
+  --min-train-eligible 1000 \
+  --require-task-family bug-repair \
+  --require-task-family test-authoring \
+  --require-verifier-type hidden-command \
+  --max-task-family-share 0.40 \
+  --max-repository-share 0.10 \
+  --output runs/train-registry/seed-audit.json
+```
+
+Scenario-level audits compare trainable scenarios against held-out evaluator oracles without
+exposing oracle text to the agent. They fail when trainable scenarios reuse held-out hidden test
+commands, reference artifacts, patch/test-patch hashes, or source-instance metadata:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry scenario-audit \
+  --root runs/train-registry \
+  --holdout-root runs/eval-registry \
+  --output runs/train-registry/scenario-audit.json
+```
+
+Create a stratified human-review queue before approving production data. The queue samples by task
+family, difficulty, source method, and verifier type, and writes JSONL records with the public
+query, reproducibility metadata, verifier summary, and review questions:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry review-queue \
+  --root runs/train-registry \
+  --sample-per-stratum 2 \
+  --output runs/train-registry/seed-review.jsonl \
+  --overwrite
+```
+
+The policy gate fails when the trainable pool is too small, a required task family or verifier is
+missing, one family/source/repository/language dominates the trainable pool, or a trainable seed
+overlaps held-out seeds by normalized issue text, provenance, source instance, or repository.
+For repository-understanding tasks, `agent-run` also evaluates trace-quality metadata by checking
+that the recorded trace contains retrieval evidence and a final answer.
 
 ## Capabilities
 
@@ -336,8 +475,8 @@ ead replay --trace runs/agent.jsonl
 
 ### Importing Query and Workspace Seeds
 
-The registry importer accepts local JSON or JSONL records shaped like SWE-bench, SWE-smith, and
-Multi-SWE-bench exports. Each imported record creates:
+The registry importer accepts local JSON or JSONL records shaped like public issue/PR exports,
+SWE-bench, SWE-smith, and Multi-SWE-bench exports. Each imported record creates:
 
 - a `QuerySeed` from the issue or problem statement;
 - an `EnvironmentSpec` from the repository, fixed revision, image, setup, and health metadata;
@@ -359,6 +498,48 @@ hashes. It does not place raw reference patches or hidden test IDs in public sce
 If a source provides test identifiers instead of executable commands, keep them in evaluator
 metadata or provide a safe command template such as
 `--test-command-template 'python -m pytest {test}'` for compatible repositories.
+
+For non-benchmark public issue and PR exports, use `--format public-issue`,
+`--format public-pr`, or `--format public-issue-pr`. Each record must include a repository source
+URI, a fixed commit in `source_revision` or `base_commit`, a license, and public task text from
+`query`, `problem_statement`, or `title` plus `body`. Optional fields such as `labels`, `language`,
+`test_commands`, `build_commands`, `benchmark_commands`, `adversarial_tests`,
+`example_commands`, `doctest_commands`, `required_state`, `forbidden_state`,
+`diff_constraints`, `patch`, and `test_patch` drive task-family inference and verifier metadata.
+Non-allowlisted licenses are imported as non-trainable unless the caller explicitly allows them.
+
+For repository-grounded synthetic generation, use `ead registry generate-synthetic --source`.
+The source file contains one or more repository specs with `repository`, `source_uri`,
+`source_revision` or `base_commit`, `license`, `language`, optional sandbox setup fields, and one
+or more `targets`. Target fields such as `paths`, `test_commands`, `build_commands`,
+`ci_commands`, `doctest_commands`, `example_commands`, `benchmark_commands`,
+`adversarial_tests`, `migration_commands`, `required_state`, `forbidden_state`,
+`diff_constraints`, `performance_threshold`, `retrieval_requirements`, and
+`trace_quality_rubric` provide the verifier evidence required by each task family. A minimal
+shape is:
+
+```json
+{
+  "repository": "example/tool",
+  "source_uri": "https://github.com/example/tool.git",
+  "source_revision": "ffffffffffffffffffffffffffffffffffffffff",
+  "license": "MIT",
+  "language": "Python",
+  "targets": [
+    {
+      "name": "parser",
+      "paths": ["src/tool/parser.py"],
+      "test_commands": ["python -m pytest tests/test_parser.py"],
+      "build_commands": ["python -m build"],
+      "doctest_commands": ["python -m doctest README.md"],
+      "benchmark_commands": ["python benchmarks/parser_bench.py --max-ms 50"],
+      "adversarial_tests": ["python -m pytest tests/security/test_parser.py"],
+      "diff_constraints": ["do not rename the public Parser API"],
+      "retrieval_requirements": ["cite src/tool/parser.py"]
+    }
+  ]
+}
+```
 
 ### Docker on macOS
 
