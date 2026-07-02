@@ -1,0 +1,15 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Easy Agentic Data icon</title>
+  <desc id="desc">A compact mark showing reproducible agent trajectories flowing from a seed through tools into verified data.</desc>
+  <rect x="10" y="10" width="140" height="140" rx="26" fill="#0F172A"/>
+  <path d="M40 108V54C40 46.268 57.909 40 80 40C102.091 40 120 46.268 120 54V108C120 115.732 102.091 122 80 122C57.909 122 40 115.732 40 108Z" fill="#F8FAFC"/>
+  <path d="M40 54C40 61.732 57.909 68 80 68C102.091 68 120 61.732 120 54" stroke="#0F172A" stroke-width="8" stroke-linecap="round"/>
+  <path d="M40 80C40 87.732 57.909 94 80 94C102.091 94 120 87.732 120 80" stroke="#CBD5E1" stroke-width="8" stroke-linecap="round"/>
+  <path d="M40 106C40 113.732 57.909 120 80 120C102.091 120 120 113.732 120 106" stroke="#CBD5E1" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="45" cy="45" r="12" fill="#38BDF8"/>
+  <circle cx="115" cy="45" r="12" fill="#F59E0B"/>
+  <circle cx="45" cy="115" r="12" fill="#22C55E"/>
+  <path d="M56 48H104" stroke="#38BDF8" stroke-width="6" stroke-linecap="round"/>
+  <path d="M48 56V104" stroke="#22C55E" stroke-width="6" stroke-linecap="round"/>
+  <path d="M74 98L83 107L101 86" stroke="#16A34A" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

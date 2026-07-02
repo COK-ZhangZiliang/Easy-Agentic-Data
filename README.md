@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/easy-agentic-data-icon.svg" alt="Easy Agentic Data icon" width="112">
+
 # Easy Agentic Data
 
 **Build reproducible, verifiable agent trajectories for post-training.**
@@ -12,8 +14,9 @@ and sandboxed tools turn their interaction into training data.
 [![Tests](https://img.shields.io/badge/tests-83%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
-[Quick Start](#quick-start) · [Architecture](#architecture) · [Local Models](#local-llm-api) ·
-[Documentation](#documentation)
+[Quick Start](#quick-start) · [Architecture](#architecture) ·
+[Why Not Existing Agents](#why-not-use-an-existing-agent-framework) ·
+[Local Models](#local-llm-api) · [Documentation](#documentation)
 
 </div>
 
@@ -49,6 +52,40 @@ reset, tools that can be governed, outcomes that can be checked, and traces that
 - **Provider-neutral**: Hosted and locally deployed OpenAI-compatible APIs share one interface.
 - **Training-neutral**: Export standard JSONL for SFT, preference optimization, and RL workflows.
 - **Headless by design**: No UI or browser automation is required for the core synthesis loop.
+
+## Why Not Use an Existing Agent Framework?
+
+Existing coding-agent frameworks are useful execution backends, but they are not the same as an
+agent-data factory. A framework such as Codex, Claude Code, OpenHands, or another tool-using agent
+can attempt a coding task, but Easy Agentic Data is responsible for the surrounding data contract:
+how tasks are seeded, how workspaces are recreated, how hidden evaluators stay isolated, how each
+tool decision is recorded, and how trajectories become reproducible training examples.
+
+The project therefore treats agent implementations as replaceable workers rather than as the
+source of truth. This keeps the core dataset independent of one provider, prompt, CLI, or log
+format.
+
+- **Trace ownership**: Training data needs a stable event schema with model responses, requested
+  tools, policy decisions, tool results, workspace diffs, verification results, and termination
+  reasons. External agents may expose logs, but their internal formats and guarantees can change.
+- **Hidden-context isolation**: Reference patches, hidden tests, evaluator state, and private user
+  facts must never be placed in the agent prompt or public trace. The data factory owns that
+  boundary instead of trusting a black-box runner to enforce it.
+- **Reproducible environments**: Each trajectory must trace back to a versioned query seed,
+  content-addressed workspace source, sandbox policy, setup commands, model parameters, and random
+  seed. Completing one task is not enough; the initial and final states must be auditable.
+- **Executable verification**: Success is decided primarily by deterministic checks against the
+  sandboxed workspace, not by the agent's final summary or a model judge. Hard failures cannot be
+  averaged away.
+- **Batch quality control**: Large-scale synthesis needs durable scheduling, shard-level budgets,
+  resume behavior, quality reports, review samples, and scale-up decisions. These controls sit
+  above any single agent loop.
+- **Backend neutrality**: The same registry and trace contract should support a small in-repo
+  headless agent, OpenAI-compatible models, local models, or future adapters around external agent
+  CLIs. Adding a backend should not redefine the dataset.
+
+In short, existing agents can be plugged in as workers when they can provide enough observable
+events, but the durable product is the reproducible scenario, trace, verifier, and export pipeline.
 
 ## Capabilities
 
