@@ -21,7 +21,7 @@ class CodingToolResult:
 
 SCHEMAS: dict[str, dict[str, Any]] = {
     "list_files": {"required": [], "properties": {"path": str}},
-    "read_file": {"required": ["path"], "properties": {"path": str}},
+    "read_file": {"required": ["path"], "properties": {"path": str, "offset": int, "limit": int}},
     "search_files": {"required": ["query"], "properties": {"query": str}},
     "apply_patch": {
         "required": ["path", "old", "new"],
@@ -35,7 +35,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 
 DESCRIPTIONS = {
     "list_files": "List workspace files under an optional relative directory with bounded output.",
-    "read_file": "Read a UTF-8 text file at a workspace-relative path with bounded output.",
+    "read_file": (
+        "Read a UTF-8 text file at a workspace-relative path with bounded output. Optional "
+        "offset and limit select 1-based line ranges."
+    ),
     "search_files": (
         "Search text files for an exact string and return matching lines. Binary or unreadable "
         "files are skipped."
@@ -97,6 +100,11 @@ class CodingToolRuntime:
             }
         if name == "read_file":
             content = self.sandbox.read(arguments["path"])
+            content = _slice_lines(
+                content,
+                offset=arguments.get("offset"),
+                limit=arguments.get("limit"),
+            )
             return {
                 "path": arguments["path"],
                 "content": content[:MAX_READ_CHARS],
@@ -196,10 +204,17 @@ def _validate(name: str, arguments: dict[str, Any]) -> None:
     for key, expected in schema["properties"].items():
         if key in arguments and not isinstance(arguments[key], expected):
             raise TypeError(f"Tool argument {key} must be {expected.__name__}")
+    if name == "read_file":
+        offset = arguments.get("offset")
+        limit = arguments.get("limit")
+        if offset is not None and offset < 1:
+            raise ValueError("Tool argument offset must be >= 1")
+        if limit is not None and limit < 1:
+            raise ValueError("Tool argument limit must be >= 1")
 
 
 def _json_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    types = {str: "string", list: "array"}
+    types = {str: "string", list: "array", int: "integer"}
     properties = {}
     for key, value in schema["properties"].items():
         property_schema = {"type": types[value]}
@@ -212,6 +227,15 @@ def _json_schema(schema: dict[str, Any]) -> dict[str, Any]:
         "required": schema["required"],
         "additionalProperties": False,
     }
+
+
+def _slice_lines(content: str, *, offset: int | None, limit: int | None) -> str:
+    if offset is None and limit is None:
+        return content
+    lines = content.splitlines(keepends=True)
+    start = (offset - 1) if offset is not None else 0
+    stop = start + limit if limit is not None else None
+    return "".join(lines[start:stop])
 
 
 def _parse_grep_matches(output: str) -> list[dict[str, Any]]:

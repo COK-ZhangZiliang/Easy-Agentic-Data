@@ -45,9 +45,12 @@ class HeadlessAgent:
             "2. Make the smallest change that fully satisfies the user request.\n"
             "3. Use only available tools and paths inside the workspace. Never invent results.\n"
             "4. After editing, run the narrowest relevant validation, then inspect the diff.\n"
-            "5. If a tool fails, diagnose the error and retry with a corrected action.\n"
-            "6. Ask the user only when required information cannot be discovered safely.\n"
-            "7. Finish with a concise summary of changes and validation actually performed."
+            "5. If validation passes and the diff matches the requested fix, stop and summarize.\n"
+            "6. If a tool fails, diagnose the error and retry with a corrected action.\n"
+            "7. Do not call unavailable tools or broad exploratory commands after a focused "
+            "test passes.\n"
+            "8. Ask the user only when required information cannot be discovered safely.\n"
+            "9. Finish with a concise summary of changes and validation actually performed."
         ),
     ) -> None:
         self.client = client

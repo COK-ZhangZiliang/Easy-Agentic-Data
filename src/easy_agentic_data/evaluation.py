@@ -79,6 +79,40 @@ class HiddenCommandEvaluator:
             )
 
 
+class HiddenTestPatchEvaluator:
+    name = "hidden_test_patch"
+
+    def evaluate(self, sandbox: Sandbox, instance: ScenarioInstance) -> EvaluationEvidence:
+        patch = instance.hidden_evaluator.metadata.get("test_patch", "")
+        if not isinstance(patch, str) or not patch.strip():
+            return EvaluationEvidence(self.name, True, 1.0, "No hidden test patch configured")
+        try:
+            sandbox.write(".ead_hidden_test.patch", patch)
+            result = sandbox.execute(["git", "apply", ".ead_hidden_test.patch"])
+            return EvaluationEvidence(
+                self.name,
+                result.exit_code == 0,
+                1.0 if result.exit_code == 0 else 0.0,
+                "Hidden test patch applied"
+                if result.exit_code == 0
+                else "Hidden test patch failed to apply",
+                {
+                    "exit_code": result.exit_code,
+                    "stdout": _redact_hidden_values(result.stdout, [patch]),
+                    "stderr": _redact_hidden_values(result.stderr, [patch]),
+                },
+                infrastructure_failure=result.exit_code != 0,
+            )
+        except Exception as exc:
+            return EvaluationEvidence(
+                self.name,
+                False,
+                0.0,
+                f"Evaluator infrastructure failure: {exc}",
+                infrastructure_failure=True,
+            )
+
+
 class RequiredStateEvaluator:
     name = "required_state"
 
@@ -197,6 +231,25 @@ def apply_agent_termination(
     )
 
 
+def evaluation_result_metrics(report: EvaluationReport) -> dict[str, float]:
+    """Summarize verifier outcomes as numeric metrics for batch aggregation."""
+
+    metrics: dict[str, float] = {}
+    non_agent_results = []
+    for result in report.results:
+        name = _metric_safe_name(result.evaluator)
+        metrics[f"verifier_{name}_passed"] = 1.0 if result.passed else 0.0
+        if result.evaluator != "agent_termination":
+            non_agent_results.append(result)
+    metrics["verifier_all_non_agent_passed"] = (
+        1.0
+        if non_agent_results
+        and all(result.passed and not result.infrastructure_failure for result in non_agent_results)
+        else 0.0
+    )
+    return metrics
+
+
 def finalize_evaluation_trace(
     recorder: TraceRecorder,
     report: EvaluationReport,
@@ -236,16 +289,20 @@ def finalize_evaluation_trace(
 
 def contamination_findings(trace_path: str | Path, instance: ScenarioInstance) -> list[str]:
     content = Path(trace_path).read_text(encoding="utf-8")
-    candidates = (
-        instance.hidden_evaluator.hidden_tests
-        + instance.hidden_evaluator.reference_artifacts
-        + (
-            [instance.hidden_evaluator.reference_answer]
-            if instance.hidden_evaluator.reference_answer
-            else []
-        )
-    )
+    candidates = instance.sensitive_strings()
     return [value for value in candidates if value and value in content]
+
+
+def _metric_safe_name(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value).strip("_")
+
+
+def _redact_hidden_values(text: str, hidden_values: Iterable[str]) -> str:
+    redacted = text
+    for value in hidden_values:
+        if value:
+            redacted = redacted.replace(value, "[redacted hidden context]")
+    return redacted
 
 
 def pass_at_k(rewards: Iterable[int]) -> dict[str, float]:

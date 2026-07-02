@@ -312,10 +312,12 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 - [ ] Integrate local model endpoint and sandbox worker health checks into batch execution.
 - [ ] Emit dataset manifests with exact scenario, model, prompt, tool, image, evaluator, and exporter
   versions.
-- [ ] Expose quality reports for coverage, duplicates, success rate, pass@k, tool usage, interaction
+- [x] Expose quality reports for coverage, duplicates, success rate, pass@k, tool usage, interaction
   depth, policy denials, and infrastructure failures.
 - [x] Add reward variance, low-information rollout group, goal-type success, simulator-error, and
   goal-alignment diagnostics to batch quality reports.
+- [x] Add scenario-level quality gates and token estimates for scale-up candidate selection.
+- [x] Add a scale-readiness summary artifact before approving larger provider runs.
 - [x] Add explicit smoke, complex synthetic, and registry-backed synthesis tiers.
 - [ ] Add configurable human-review sampling and reviewer feedback ingestion.
 - [x] Add a pluggable worker protocol after stabilizing the local scheduler contract.
@@ -417,3 +419,9 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-06-17 | Added SWE-style query/workspace seed import from local JSON and JSONL sources into the scenario registry. |
 | 2026-06-17 | Preserved assistant `reasoning_content` in trajectory, SFT, preference, and RL episode exports while keeping hidden-context reasoning out of agent records. |
 | 2026-06-19 | Added three synthesis tiers plus a complex synthetic multi-tool trajectory generator with hidden evaluation and derived exports. |
+| 2026-07-01 | Added a DeepSeek V4 Pro thinking config, batch quality-report CLI, scenario-level scale-up candidate selection, and token-estimate sharding for 50-trace pilot review. |
+| 2026-07-01 | Added a no-side-effect batch dry run for shard selection previews before paid provider scale-up. |
+| 2026-07-01 | Added an agent-stop-rate scale gate and a stricter DeepSeek V4 Pro scale queue based on full pilot trace review. |
+| 2026-07-01 | Added a reusable trace-logic audit CLI for reviewing coherence, completion, and multi-step complexity before continuing scale-up. |
+| 2026-07-01 | Wired trace-logic audit metrics into scale candidate selection and prepared an audit-strict DeepSeek V4 Pro scale queue. |
+| 2026-07-01 | Added a scale-readiness summary CLI to combine candidate selection, cost estimate, shard status, trace audit, and continuation gates. |

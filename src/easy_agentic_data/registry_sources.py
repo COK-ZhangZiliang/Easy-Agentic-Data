@@ -198,6 +198,7 @@ def scenario_from_swe_style_record(
             "test_patch_sha256": _sha256(test_patch),
             "patch_stored_as_reference": bool(patch),
             "test_patch_stored_as_reference": bool(test_patch),
+            "test_patch": test_patch,
         },
     )
     return Scenario(
@@ -355,14 +356,23 @@ def _reference_artifacts(
 def _hidden_test_commands(test_ids: list[str], template: str) -> list[str]:
     if not template:
         return []
-    return [template.format(test=shlex.quote(_safe_test_id(test_id))) for test_id in test_ids]
+    commands: list[str] = []
+    seen: set[str] = set()
+    for test_id in test_ids:
+        command = template.format(test=shlex.quote(_stable_pytest_test_id(test_id)))
+        if command not in seen:
+            commands.append(command)
+            seen.add(command)
+    return commands
 
 
-def _safe_test_id(test_id: str) -> str:
+def _stable_pytest_test_id(test_id: str) -> str:
     if test_id.startswith("-"):
         raise ValueError(f"unsafe hidden test id: {test_id}")
     if any(character in test_id for character in ("\x00", "\n", "\r")):
         raise ValueError("hidden test id cannot contain control characters")
+    if "[" in test_id:
+        return test_id.split("[", 1)[0]
     return test_id
 
 

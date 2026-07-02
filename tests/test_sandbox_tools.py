@@ -132,19 +132,29 @@ class SandboxToolTests(unittest.TestCase):
     def test_file_tools_return_bounded_structured_outputs(self) -> None:
         files = {f"file_{index}.txt": "x" for index in range(510)}
         files["large.txt"] = "a" * 40_010
+        files["lines.txt"] = "one\ntwo\nthree\nfour\n"
         sandbox = MemorySandbox(files)
         sandbox.create()
         runtime = CodingToolRuntime(sandbox, ToolPolicy(["list_files", "read_file"]))
 
         listed = runtime.execute("list_files", {"path": "."})
         read = runtime.execute("read_file", {"path": "large.txt"})
+        sliced = runtime.execute("read_file", {"path": "lines.txt", "offset": 2, "limit": 2})
 
-        self.assertEqual(listed.output["file_count"], 511)
+        self.assertEqual(listed.output["file_count"], 512)
         self.assertEqual(len(listed.output["files"]), 500)
         self.assertTrue(listed.output["truncated"])
         self.assertEqual(read.output["chars"], 40_010)
         self.assertEqual(len(read.output["content"]), 40_000)
         self.assertTrue(read.output["truncated"])
+        self.assertEqual(sliced.output["content"], "two\nthree\n")
+
+    def test_read_file_rejects_invalid_slice_bounds(self) -> None:
+        offset = self.runtime.execute("read_file", {"path": "app.py", "offset": 0})
+        limit = self.runtime.execute("read_file", {"path": "app.py", "limit": 0})
+
+        self.assertIn("offset must be >= 1", offset.error or "")
+        self.assertIn("limit must be >= 1", limit.error or "")
 
     def test_docker_backend_requires_digest_and_uses_safe_flags(self) -> None:
         with self.assertRaisesRegex(ValueError, "content-addressed by digest"):
@@ -158,7 +168,8 @@ class SandboxToolTests(unittest.TestCase):
 
         def capture(command, **kwargs):
             calls.append(command)
-            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            stdout = "1\t/workspace\n" if command[-3:] == ["du", "-sk", "/workspace"] else ""
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
@@ -171,6 +182,40 @@ class SandboxToolTests(unittest.TestCase):
         self.assertIn("--read-only", create)
         self.assertIn("--pids-limit", create)
         self.assertNotIn("/var/run/docker.sock", " ".join(create))
+
+    def test_docker_root_setup_execution_is_explicit(self) -> None:
+        sandbox = DockerSandbox(image_digest="sha256:" + "b" * 64, source_directory=".")
+        sandbox.container_name = "container"
+        calls = []
+
+        def capture(command, **kwargs):
+            calls.append(command)
+            stdout = "1\t/workspace\n" if command[-3:] == ["du", "-sk", "/workspace"] else ""
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch.object(sandbox, "_run_host", side_effect=capture):
+            sandbox.execute_as_root(["python", "-m", "pip", "install", "--no-deps", "-e", "."])
+
+        self.assertEqual(
+            calls[0][:11],
+            [
+                "docker",
+                "exec",
+                "--env",
+                (
+                    "PYTHONPATH=/workspace/.ead_prefix/lib/python3.9/site-packages:"
+                    "/workspace/.ead_prefix/lib/python3.11/site-packages:"
+                    "/workspace/src:/workspace/.ead_site:/workspace"
+                ),
+                "--env",
+                "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0",
+                "--env",
+                "MPLCONFIGDIR=/tmp/matplotlib",
+                "--user",
+                "0:0",
+                "container",
+            ],
+        )
 
 
 class _UnreadableFileSandbox(MemorySandbox):

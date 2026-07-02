@@ -181,6 +181,9 @@ class _SetupSandbox:
         self.commands.append(command)
         return CommandResult(self.exit_code, "", "failed" if self.exit_code else "", 1.0, False)
 
+    def execute_as_root(self, command: list[str]) -> CommandResult:
+        return self.execute(command)
+
 
 if __name__ == "__main__":
     unittest.main()

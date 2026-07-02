@@ -11,6 +11,12 @@ from easy_agentic_data.environments import is_immutable_image_reference
 
 from .base import CommandResult, SandboxLimits
 
+SANDBOX_PYTHONPATH = (
+    "/workspace/.ead_prefix/lib/python3.9/site-packages:"
+    "/workspace/.ead_prefix/lib/python3.11/site-packages:"
+    "/workspace/src:/workspace/.ead_site:/workspace"
+)
+
 
 class DockerSandbox:
     """Rootless Docker backend using a named volume and deny-by-default networking."""
@@ -87,9 +93,36 @@ class DockerSandbox:
         )
 
     def execute(self, command: list[str], *, timeout_seconds: float | None = None) -> CommandResult:
+        return self._execute(command, timeout_seconds=timeout_seconds, user=None)
+
+    def execute_as_root(
+        self, command: list[str], *, timeout_seconds: float | None = None
+    ) -> CommandResult:
+        return self._execute(command, timeout_seconds=timeout_seconds, user="0:0")
+
+    def _execute(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: float | None = None,
+        user: str | None = None,
+    ) -> CommandResult:
         started = time.perf_counter()
+        docker_command = [
+            "docker",
+            "exec",
+            "--env",
+            f"PYTHONPATH={SANDBOX_PYTHONPATH}",
+            "--env",
+            "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0",
+            "--env",
+            "MPLCONFIGDIR=/tmp/matplotlib",
+        ]
+        if user is not None:
+            docker_command.extend(["--user", user])
+        docker_command.extend([self.container_name, *command])
         completed = self._run_host(
-            ["docker", "exec", self.container_name, *command],
+            docker_command,
             check=False,
             timeout=timeout_seconds or self.limits.timeout_seconds,
         )

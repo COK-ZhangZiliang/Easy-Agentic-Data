@@ -41,6 +41,8 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertNotIn("hidden_evaluator", public_instance)
         self.assertNotIn("USER_CANARY_12345", encoded)
         self.assertNotIn("EVALUATOR_CANARY_67890", encoded)
+        self.assertNotIn("HIDDEN_TEST_PATCH_CANARY", encoded)
+        self.assertIn("HIDDEN_TEST_PATCH_CANARY", instance.sensitive_strings())
 
     def test_environment_metadata_rejects_secret_like_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "secret-like"):
@@ -81,6 +83,7 @@ def _scenario() -> Scenario:
             reference_answer="EVALUATOR_CANARY_67890",
             hidden_tests=["tests/hidden/test_parser.py"],
             required_state={"tests_pass": True},
+            metadata={"test_patch": "HIDDEN_TEST_PATCH_CANARY"},
         ),
     )
 

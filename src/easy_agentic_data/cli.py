@@ -14,6 +14,15 @@ from easy_agentic_data.batch import (
     RolloutJob,
     RolloutOutcome,
     RunBudget,
+    audit_trace_logic,
+    enqueue_human_review,
+    estimate_scale_run,
+    planned_batch_run,
+    quality_report,
+    scale_continuation_decision,
+    scale_readiness_summary,
+    select_scale_candidates,
+    selected_job_status,
 )
 from easy_agentic_data.coding_tools import SCHEMAS, CodingToolRuntime
 from easy_agentic_data.config import PipelineConfig, load_config
@@ -21,9 +30,11 @@ from easy_agentic_data.evaluation import (
     EvaluationSuite,
     ForbiddenStateEvaluator,
     HiddenCommandEvaluator,
+    HiddenTestPatchEvaluator,
     RequiredStateEvaluator,
     apply_agent_termination,
     derive_turn_rewards,
+    evaluation_result_metrics,
     finalize_evaluation_trace,
 )
 from easy_agentic_data.llm.mock import MockLLMClient
@@ -224,14 +235,91 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch_enqueue.add_argument("--model", required=True)
     batch_enqueue.add_argument("--config-hash", required=True)
     batch_enqueue.add_argument("--rollouts", type=int, default=1)
+    batch_enqueue.add_argument("--selection-file", default="")
+    batch_enqueue.add_argument("--scenario-id", action="append", default=[])
     batch_run = batch_subparsers.add_parser("run")
     batch_run.add_argument("--registry", required=True)
     batch_run.add_argument("--database", required=True)
     batch_run.add_argument("--config", required=True)
     batch_run.add_argument("--trace-directory", required=True)
     batch_run.add_argument("--max-workers", type=int, default=1)
+    batch_run.add_argument("--max-retries", type=int, default=2)
+    batch_run.add_argument("--max-jobs", type=int)
+    batch_run.add_argument("--max-seconds", type=float, default=3600.0)
+    batch_run.add_argument("--max-tokens", type=int, default=1_000_000)
+    batch_run.add_argument("--max-cost", type=float, default=100.0)
+    batch_run.add_argument("--max-agent-turns", type=int, default=20)
+    batch_run.add_argument("--max-agent-tool-calls", type=int, default=50)
+    batch_run.add_argument("--max-agent-tokens", type=int, default=100_000)
+    batch_run.add_argument("--max-agent-seconds", type=float, default=600.0)
+    batch_run.add_argument("--job-id", action="append", default=[])
+    batch_run.add_argument("--job-id-file", default="")
+    batch_run.add_argument("--shard-index", type=int)
+    batch_run.add_argument("--dry-run", action="store_true")
     batch_status = batch_subparsers.add_parser("status")
     batch_status.add_argument("--database", required=True)
+    batch_report = batch_subparsers.add_parser("report")
+    batch_report.add_argument("--database", required=True)
+    batch_report.add_argument("--output", default="")
+    batch_report.add_argument("--trace-directory", default="")
+    batch_report.add_argument("--review-sample", default="")
+    batch_report.add_argument("--overwrite-review-sample", action="store_true")
+    batch_report.add_argument("--sample-size", type=int, default=0)
+    batch_report.add_argument("--job-id", action="append", default=[])
+    batch_report.add_argument("--job-id-file", default="")
+    batch_report.add_argument("--shard-index", type=int)
+    batch_select = batch_subparsers.add_parser("select-scale-candidates")
+    batch_select.add_argument("--database", required=True)
+    batch_select.add_argument("--audit", default="")
+    batch_select.add_argument("--output", default="")
+    batch_select.add_argument("--min-rollouts", type=int, default=2)
+    batch_select.add_argument("--min-success-rate", type=float, default=0.5)
+    batch_select.add_argument("--min-hidden-command-pass-rate", type=float, default=0.5)
+    batch_select.add_argument("--min-all-non-agent-pass-rate", type=float, default=0.5)
+    batch_select.add_argument("--min-agent-stop-rate", type=float, default=0.0)
+    batch_select.add_argument("--min-high-quality-rate", type=float, default=0.0)
+    batch_select.add_argument("--min-closed-loop-rate", type=float, default=0.0)
+    batch_select.add_argument("--min-multi-step-complex-rate", type=float, default=0.0)
+    batch_select.add_argument("--max-infrastructure-failure-rate", type=float, default=0.0)
+    batch_select.add_argument("--min-average-tool-calls", type=float, default=6.0)
+    batch_estimate = batch_subparsers.add_parser("estimate-scale")
+    batch_estimate.add_argument("--database", required=True)
+    batch_estimate.add_argument("--pilot-database", required=True)
+    batch_estimate.add_argument("--output", default="")
+    batch_estimate.add_argument("--shard-size", type=int, default=20)
+    batch_estimate.add_argument("--cost-per-million-tokens", type=float, default=0.0)
+    batch_shard_status = batch_subparsers.add_parser("shard-status")
+    batch_shard_status.add_argument("--database", required=True)
+    batch_shard_status.add_argument("--job-id-file", required=True)
+    batch_shard_status.add_argument("--shard-index", type=int, required=True)
+    batch_shard_status.add_argument("--output", default="")
+    batch_decision = batch_subparsers.add_parser("decide-continuation")
+    batch_decision.add_argument("--report", required=True)
+    batch_decision.add_argument("--status", required=True)
+    batch_decision.add_argument("--audit", default="")
+    batch_decision.add_argument("--output", default="")
+    batch_decision.add_argument("--min-success-rate", type=float, default=0.3)
+    batch_decision.add_argument("--min-unique-traces", type=int, default=1)
+    batch_decision.add_argument("--min-hidden-command-pass-rate", type=float, default=0.4)
+    batch_decision.add_argument("--min-high-quality-rate", type=float, default=0.0)
+    batch_decision.add_argument("--min-closed-loop-rate", type=float, default=0.0)
+    batch_decision.add_argument("--min-multi-step-complex-rate", type=float, default=0.0)
+    batch_decision.add_argument("--max-infrastructure-failures", type=int, default=0)
+    batch_audit = batch_subparsers.add_parser("audit-traces")
+    batch_audit.add_argument("--database", required=True)
+    batch_audit.add_argument("--trace-directory", required=True)
+    batch_audit.add_argument("--output", default="")
+    batch_audit.add_argument("--job-id", action="append", default=[])
+    batch_audit.add_argument("--job-id-file", default="")
+    batch_audit.add_argument("--shard-index", type=int)
+    batch_audit.add_argument("--summary-only", action="store_true")
+    batch_readiness = batch_subparsers.add_parser("scale-readiness")
+    batch_readiness.add_argument("--selection", required=True)
+    batch_readiness.add_argument("--estimate", required=True)
+    batch_readiness.add_argument("--status", required=True)
+    batch_readiness.add_argument("--audit", required=True)
+    batch_readiness.add_argument("--decision", required=True)
+    batch_readiness.add_argument("--output", default="")
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -348,9 +436,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(asdict(outcome), indent=2))
         return 0 if outcome.trace_id else 1
     if args.command == "batch":
-        scheduler = PersistentScheduler(args.database)
+        scheduler = PersistentScheduler(args.database) if hasattr(args, "database") else None
         if args.batch_command == "enqueue":
-            scenarios = ScenarioRegistry(args.registry).list_scenarios()
+            assert scheduler is not None
+            scenarios = _filter_scenarios_for_enqueue(
+                ScenarioRegistry(args.registry).list_scenarios(),
+                selection_file=Path(args.selection_file) if args.selection_file else None,
+                scenario_ids=args.scenario_id,
+            )
             scheduler.submit(
                 RolloutJob(scenario["scenario_id"], rollout, args.model, args.config_hash)
                 for scenario in scenarios
@@ -358,43 +451,388 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(scheduler.status_counts(), indent=2))
         elif args.batch_command == "status":
+            assert scheduler is not None
             print(json.dumps(scheduler.status_counts(), indent=2))
+        elif args.batch_command == "report":
+            assert scheduler is not None
+            selected_job_ids = _selected_job_ids_for_run(
+                explicit_job_ids=args.job_id,
+                job_id_file=Path(args.job_id_file) if args.job_id_file else None,
+                shard_index=args.shard_index,
+            )
+            rows = _reportable_rows(scheduler.rows(), selected_job_ids)
+            report = quality_report(rows)
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(report, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            if args.review_sample and args.sample_size > 0:
+                if args.overwrite_review_sample:
+                    Path(args.review_sample).unlink(missing_ok=True)
+                for record in _review_sample_rows(
+                    rows,
+                    sample_size=args.sample_size,
+                    trace_directory=Path(args.trace_directory) if args.trace_directory else None,
+                ):
+                    enqueue_human_review(args.review_sample, record)
+            print(json.dumps(report, indent=2, sort_keys=True))
+        elif args.batch_command == "select-scale-candidates":
+            assert scheduler is not None
+            rows = [
+                row for row in scheduler.rows() if row.get("status") not in {"pending", "running"}
+            ]
+            selection = select_scale_candidates(
+                rows,
+                audit=json.loads(Path(args.audit).read_text(encoding="utf-8"))
+                if args.audit
+                else None,
+                min_rollouts=args.min_rollouts,
+                min_success_rate=args.min_success_rate,
+                min_hidden_command_pass_rate=args.min_hidden_command_pass_rate,
+                min_all_non_agent_pass_rate=args.min_all_non_agent_pass_rate,
+                min_agent_stop_rate=args.min_agent_stop_rate,
+                min_high_quality_rate=args.min_high_quality_rate,
+                min_closed_loop_rate=args.min_closed_loop_rate,
+                min_multi_step_complex_rate=args.min_multi_step_complex_rate,
+                max_infrastructure_failure_rate=args.max_infrastructure_failure_rate,
+                min_average_tool_calls=args.min_average_tool_calls,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(selection, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+            )
+            print(json.dumps(selection, indent=2, sort_keys=True))
+        elif args.batch_command == "estimate-scale":
+            assert scheduler is not None
+            pilot_scheduler = PersistentScheduler(args.pilot_database)
+            estimate = estimate_scale_run(
+                scheduler.rows(),
+                pilot_scheduler.rows(),
+                shard_size=args.shard_size,
+                cost_per_million_tokens=args.cost_per_million_tokens,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(estimate, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+            )
+            print(json.dumps(estimate, indent=2, sort_keys=True))
+        elif args.batch_command == "shard-status":
+            assert scheduler is not None
+            payload = json.loads(Path(args.job_id_file).read_text(encoding="utf-8"))
+            job_ids = _selected_job_ids_for_run(
+                explicit_job_ids=[],
+                job_id_file=Path(args.job_id_file),
+                shard_index=args.shard_index,
+            )
+            status = selected_job_status(scheduler.rows(), job_ids or [])
+            if isinstance(payload, dict) and isinstance(payload.get("shards"), list):
+                status["estimate"] = payload["shards"][args.shard_index]
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(status, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(status, indent=2, sort_keys=True))
+        elif args.batch_command == "decide-continuation":
+            decision = scale_continuation_decision(
+                json.loads(Path(args.report).read_text(encoding="utf-8")),
+                json.loads(Path(args.status).read_text(encoding="utf-8")),
+                audit=json.loads(Path(args.audit).read_text(encoding="utf-8"))
+                if args.audit
+                else None,
+                min_success_rate=args.min_success_rate,
+                min_unique_traces=args.min_unique_traces,
+                min_hidden_command_pass_rate=args.min_hidden_command_pass_rate,
+                min_high_quality_rate=args.min_high_quality_rate,
+                min_closed_loop_rate=args.min_closed_loop_rate,
+                min_multi_step_complex_rate=args.min_multi_step_complex_rate,
+                max_infrastructure_failures=args.max_infrastructure_failures,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(decision, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+            )
+            print(json.dumps(decision, indent=2, sort_keys=True))
+        elif args.batch_command == "audit-traces":
+            assert scheduler is not None
+            selected_job_ids = _selected_job_ids_for_run(
+                explicit_job_ids=args.job_id,
+                job_id_file=Path(args.job_id_file) if args.job_id_file else None,
+                shard_index=args.shard_index,
+            )
+            audit = audit_trace_logic(
+                scheduler.rows(),
+                args.trace_directory,
+                job_ids=selected_job_ids,
+                include_items=not args.summary_only,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(audit, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(audit, indent=2, sort_keys=True))
+        elif args.batch_command == "scale-readiness":
+            readiness = scale_readiness_summary(
+                selection=json.loads(Path(args.selection).read_text(encoding="utf-8")),
+                estimate=json.loads(Path(args.estimate).read_text(encoding="utf-8")),
+                status=json.loads(Path(args.status).read_text(encoding="utf-8")),
+                audit=json.loads(Path(args.audit).read_text(encoding="utf-8")),
+                decision=json.loads(Path(args.decision).read_text(encoding="utf-8")),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(readiness, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(readiness, indent=2, sort_keys=True))
         elif args.batch_command == "run":
+            assert scheduler is not None
+            selected_job_ids = _selected_job_ids_for_run(
+                explicit_job_ids=args.job_id,
+                job_id_file=Path(args.job_id_file) if args.job_id_file else None,
+                shard_index=args.shard_index,
+            )
+            if args.dry_run:
+                plan = planned_batch_run(
+                    scheduler.rows(),
+                    job_ids=selected_job_ids,
+                    max_jobs=args.max_jobs,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "dry_run": True,
+                            "database": args.database,
+                            "registry": args.registry,
+                            "config": args.config,
+                            "trace_directory": args.trace_directory,
+                            "max_workers": args.max_workers,
+                            "max_retries": args.max_retries,
+                            "max_jobs": args.max_jobs,
+                            "budgets": {
+                                "max_seconds": args.max_seconds,
+                                "max_tokens": args.max_tokens,
+                                "max_cost": args.max_cost,
+                                "max_agent_turns": args.max_agent_turns,
+                                "max_agent_tool_calls": args.max_agent_tool_calls,
+                                "max_agent_tokens": args.max_agent_tokens,
+                                "max_agent_seconds": args.max_agent_seconds,
+                            },
+                            **plan,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 0
             worker = _CLIRolloutWorker(
                 ScenarioRegistry(args.registry),
                 load_config(args.config),
                 Path(args.trace_directory),
+                _agent_budgets(args),
             )
             summary = scheduler.run(
                 worker,
                 max_workers=args.max_workers,
-                budget=RunBudget(),
+                max_retries=args.max_retries,
+                budget=RunBudget(
+                    max_seconds=args.max_seconds,
+                    max_tokens=args.max_tokens,
+                    max_cost=args.max_cost,
+                ),
+                max_jobs=args.max_jobs,
+                job_ids=selected_job_ids,
             )
             print(json.dumps(summary, indent=2))
         return 0
     return 1
 
 
+def _review_sample_rows(
+    rows: Sequence[dict[str, object]],
+    *,
+    sample_size: int,
+    trace_directory: Path | None,
+) -> list[dict[str, object]]:
+    candidates = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("status") or "") == "completed",
+            str(row.get("status") or ""),
+            str(row.get("job_id") or ""),
+        ),
+    )
+    records: list[dict[str, object]] = []
+    for row in candidates[:sample_size]:
+        record: dict[str, object] = {
+            "job_id": row.get("job_id", ""),
+            "scenario_id": row.get("scenario_id", ""),
+            "rollout_index": row.get("rollout_index", 0),
+            "model": row.get("model", ""),
+            "status": row.get("status", ""),
+            "success": bool(row.get("success", 0)),
+            "trace_id": row.get("trace_id", ""),
+            "reason": "batch quality sample",
+        }
+        if trace_directory is not None and row.get("job_id"):
+            record["trace_path"] = str(trace_directory / f"{row['job_id']}.jsonl")
+        records.append(record)
+    return records
+
+
+def _reportable_rows(
+    rows: Sequence[dict[str, object]],
+    selected_job_ids: Sequence[str] | None,
+) -> list[dict[str, object]]:
+    selected = set(selected_job_ids or [])
+    return [
+        row
+        for row in rows
+        if row.get("status") not in {"pending", "running"}
+        and (not selected or str(row.get("job_id") or "") in selected)
+    ]
+
+
+def _filter_scenarios_for_enqueue(
+    scenarios: Sequence[dict[str, object]],
+    *,
+    selection_file: Path | None,
+    scenario_ids: Sequence[str],
+) -> list[dict[str, object]]:
+    filter_requested = bool(scenario_ids) or selection_file is not None
+    selected = set(str(value) for value in scenario_ids)
+    if selection_file is not None:
+        payload = json.loads(selection_file.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            file_ids = payload.get("candidates", [])
+        else:
+            file_ids = payload
+        if not isinstance(file_ids, list) or not all(isinstance(item, str) for item in file_ids):
+            raise ValueError("Selection file must contain a candidates list of scenario IDs")
+        selected = set(file_ids) if not selected else selected & set(file_ids)
+    if not filter_requested:
+        return list(scenarios)
+    return [scenario for scenario in scenarios if str(scenario.get("scenario_id")) in selected]
+
+
+def _selected_job_ids_for_run(
+    *,
+    explicit_job_ids: Sequence[str],
+    job_id_file: Path | None,
+    shard_index: int | None,
+) -> list[str] | None:
+    selected = list(explicit_job_ids)
+    if job_id_file is not None:
+        payload = json.loads(job_id_file.read_text(encoding="utf-8"))
+        if shard_index is not None:
+            if not isinstance(payload, dict) or not isinstance(payload.get("shards"), list):
+                raise ValueError("Shard selection requires an estimate file with a shards list")
+            shards = payload["shards"]
+            if shard_index < 0 or shard_index >= len(shards):
+                raise ValueError(f"Shard index {shard_index} is outside the estimate shard range")
+            file_ids = shards[shard_index].get("job_ids", {})
+        elif isinstance(payload, dict):
+            file_ids = payload.get("job_ids", [])
+        else:
+            file_ids = payload
+        if not isinstance(file_ids, list) or not all(isinstance(item, str) for item in file_ids):
+            raise ValueError("Job selection file must contain a list of job IDs")
+        selected.extend(file_ids)
+    elif shard_index is not None:
+        raise ValueError("--shard-index requires --job-id-file")
+    if not selected:
+        return None
+    return sorted(set(selected))
+
+
 class _CLIRolloutWorker:
-    def __init__(self, registry: ScenarioRegistry, config: PipelineConfig, trace_directory: Path):
+    def __init__(
+        self,
+        registry: ScenarioRegistry,
+        config: PipelineConfig,
+        trace_directory: Path,
+        budgets: AgentBudgets | None = None,
+    ):
         self.registry = registry
         self.config = config
         self.trace_directory = trace_directory
+        self.budgets = budgets
 
     def run(self, job: RolloutJob) -> RolloutOutcome:
+        trace_path = self.trace_directory / f"{job.job_id}.jsonl"
+        if trace_path.exists():
+            return _rollout_outcome_from_existing_trace(trace_path)
         try:
             return _run_registry_scenario(
                 self.registry,
                 job.scenario_id,
                 self.config,
-                self.trace_directory / f"{job.job_id}.jsonl",
+                trace_path,
                 job.rollout_index,
+                self.budgets,
             )
         except Exception as exc:
             return RolloutOutcome(
                 infrastructure_failure=True,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+
+def _rollout_outcome_from_existing_trace(trace_path: Path) -> RolloutOutcome:
+    trace = load_trace(trace_path)
+    if not trace.events or trace.events[-1].event_type.value != "session_finished":
+        return RolloutOutcome(
+            infrastructure_failure=True,
+            error=f"Incomplete existing trace: {trace_path}",
+        )
+    success = False
+    tokens = 0
+    tool_calls = 0
+    metrics: dict[str, float] = {}
+    for event in trace.events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.event_type.value == "model_response":
+            usage = payload.get("usage", {})
+            if isinstance(usage, dict):
+                tokens += int(usage.get("total_tokens", 0) or 0)
+        elif event.event_type.value == "tool_requested":
+            tool_calls += 1
+        elif event.event_type.value == "verification_result":
+            verifier = str(payload.get("verifier") or "").replace("-", "_")
+            if verifier:
+                metrics[f"verifier_{verifier}_passed"] = (
+                    1.0 if bool(payload.get("passed", False)) else 0.0
+                )
+        elif event.event_type.value == "session_finished":
+            success = bool(payload.get("success", False))
+    non_agent_verifiers = [
+        value
+        for key, value in metrics.items()
+        if key.startswith("verifier_") and key != "verifier_agent_termination_passed"
+    ]
+    metrics["verifier_all_non_agent_passed"] = (
+        1.0 if non_agent_verifiers and all(value == 1.0 for value in non_agent_verifiers) else 0.0
+    )
+    metrics["tool_calls"] = float(tool_calls)
+    metrics["tokens"] = float(tokens)
+    return RolloutOutcome(
+        trace_id=trace.trace_id,
+        success=success,
+        tokens=tokens,
+        metrics=metrics,
+    )
 
 
 def _run_registry_scenario(
@@ -475,17 +913,20 @@ def _run_registry_scenario(
                 trace_id=trace.trace_id,
                 success=report.success,
                 tokens=run_result.tokens,
-                metrics=report.metrics,
+                metrics={**report.metrics, **evaluation_result_metrics(report)},
             )
         finally:
             sandbox.destroy()
 
 
 def _deterministic_evaluators(instance):
-    evaluators = [
+    evaluators = []
+    if instance.hidden_evaluator.metadata.get("test_patch"):
+        evaluators.append(HiddenTestPatchEvaluator())
+    evaluators.extend(
         HiddenCommandEvaluator(shlex.split(command))
         for command in instance.hidden_evaluator.hidden_tests
-    ]
+    )
     if instance.hidden_evaluator.required_state:
         evaluators.append(RequiredStateEvaluator())
     if instance.hidden_evaluator.forbidden_state:
@@ -495,7 +936,7 @@ def _deterministic_evaluators(instance):
 
 def _run_setup_commands(sandbox: DockerSandbox, commands: Sequence[str]) -> None:
     for command in commands:
-        result = sandbox.execute(shlex.split(command))
+        result = sandbox.execute_as_root(shlex.split(command))
         if result.exit_code != 0:
             raise RuntimeError(
                 "Environment setup command failed "
@@ -509,6 +950,7 @@ def _agent_budgets(args) -> AgentBudgets:
         max_turns=args.max_agent_turns,
         max_tool_calls=args.max_agent_tool_calls,
         max_tokens=args.max_agent_tokens,
+        max_seconds=getattr(args, "max_agent_seconds", 600.0),
     )
 
 

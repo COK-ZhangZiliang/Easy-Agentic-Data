@@ -134,6 +134,7 @@ class ScenarioInstance:
         _collect_strings(self.hidden_evaluator.reference_answer, hidden_values)
         _collect_strings(self.hidden_evaluator.reference_artifacts, hidden_values)
         _collect_strings(self.hidden_evaluator.hidden_tests, hidden_values)
+        _collect_strings(self.hidden_evaluator.metadata.get("test_patch"), hidden_values)
         _collect_strings(self.public_task.to_dict(), public_values)
         public = set(public_values)
         return sorted({value for value in hidden_values if len(value) >= 8 and value not in public})

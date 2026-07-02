@@ -52,7 +52,9 @@ class RegistrySourceTests(unittest.TestCase):
                 scenario.hidden_evaluator.metadata["fail_to_pass"],
                 ["tests/test_cli.py::test_quiet"],
             )
+            self.assertIn("def test_quiet", scenario.hidden_evaluator.metadata["test_patch"])
             self.assertNotIn("return False", encoded_public)
+            self.assertNotIn("def test_quiet", encoded_public)
             self.assertNotIn("test_quiet", encoded_public)
             self.assertTrue(registry.validate().valid)
 
@@ -125,6 +127,25 @@ class RegistrySourceTests(unittest.TestCase):
         self.assertEqual(
             shlex.split(command),
             ["python", "-m", "pytest", "tests/test parser.py::test quoted"],
+        )
+
+    def test_parameterized_pytest_ids_fall_back_to_stable_node_id(self) -> None:
+        record = _swe_bench_record()
+        record["FAIL_TO_PASS"] = [
+            'tests/test_cli.py::TestCLI::test_quiet["noisy value',
+            "tests/test_cli.py::TestCLI::test_quiet[other-value]",
+        ]
+
+        scenario = scenario_from_swe_style_record(
+            record,
+            source_format="swe-bench",
+            source_name="sample",
+            test_command_template="python -m pytest {test}",
+        )
+
+        self.assertEqual(
+            scenario.hidden_evaluator.hidden_tests,
+            ["python -m pytest tests/test_cli.py::TestCLI::test_quiet"],
         )
 
     def test_test_command_template_rejects_option_like_test_ids(self) -> None:

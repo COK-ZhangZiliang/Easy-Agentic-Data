@@ -99,6 +99,49 @@ class RegistryTests(unittest.TestCase):
             self.assertNotIn("artifact_secret_patch", repr(public))
             self.assertNotIn("hidden/test_value.py", repr(public))
 
+    def test_materialize_allows_safe_repository_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            (repository / "target.txt").write_text("ok\n", encoding="utf-8")
+            (repository / "link.txt").symlink_to("target.txt")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
+            environment = import_repository_environment(repository, "HEAD", name="fixture")
+
+            materialized = Path(directory) / "materialized"
+            materialize_environment_source(environment, materialized)
+
+            self.assertEqual((materialized / "link.txt").read_text(encoding="utf-8"), "ok\n")
+
+    def test_materialize_rejects_unsafe_repository_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            (repository / "bad.txt").symlink_to("/etc/passwd")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
+            environment = import_repository_environment(repository, "HEAD", name="fixture")
+
+            with self.assertRaisesRegex(ValueError, "Unsafe repository archive link target"):
+                materialize_environment_source(environment, Path(directory) / "materialized")
+
     def test_twenty_fixture_scenarios_reset_to_identical_health_state(self) -> None:
         seeds = []
         for index in range(20):

@@ -9,10 +9,12 @@ from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.evaluation import (
     EvaluationSuite,
     HiddenCommandEvaluator,
+    HiddenTestPatchEvaluator,
     RequiredStateEvaluator,
     apply_agent_termination,
     contamination_findings,
     derive_turn_rewards,
+    evaluation_result_metrics,
     finalize_evaluation_trace,
     pass_at_k,
     rank_reports,
@@ -158,6 +160,100 @@ class EvaluationExportTests(unittest.TestCase):
         self.assertTrue(report.infrastructure_failure)
         self.assertEqual(report.reward, 0)
 
+    def test_hidden_test_patch_is_applied_before_hidden_commands(self) -> None:
+        sandbox = MemorySandbox(
+            {"app.py": "value = 2\n"},
+            {
+                "git apply .ead_hidden_test.patch": _apply_hidden_test_patch,
+                "python -m hidden_test": lambda box: CommandResult(
+                    0 if "assert value == 2" in box.read("tests/test_hidden.py") else 1,
+                    "hidden\n",
+                    "",
+                    1.0,
+                ),
+            },
+        )
+        sandbox.create()
+        scenario = Scenario(
+            QuerySeed(PublicTaskContext("Set the value correctly.")),
+            EnvironmentSpec(name="evaluation-fixture", version="1"),
+            HiddenEvaluatorContext(
+                hidden_tests=["python -m hidden_test"],
+                metadata={
+                    "test_patch": (
+                        "diff --git a/tests/test_hidden.py b/tests/test_hidden.py\n"
+                        "new file mode 100644\n"
+                        "--- /dev/null\n"
+                        "+++ b/tests/test_hidden.py\n"
+                        "@@\n"
+                        "+assert value == 2\n"
+                    )
+                },
+            ),
+        )
+        instance = ScenarioInstance.materialize(
+            scenario, random_seed=2, initial_state_hash=sandbox.state_hash()
+        )
+
+        report = EvaluationSuite(
+            [HiddenTestPatchEvaluator(), HiddenCommandEvaluator(["python", "-m", "hidden_test"])]
+        ).evaluate(sandbox, instance)
+
+        self.assertTrue(report.success)
+        self.assertEqual(
+            [result.evaluator for result in report.results],
+            ["hidden_test_patch", "hidden_command"],
+        )
+
+    def test_hidden_test_patch_evidence_redacts_patch_text(self) -> None:
+        patch = (
+            "diff --git a/tests/test_hidden.py b/tests/test_hidden.py\n"
+            "--- /dev/null\n"
+            "+++ b/tests/test_hidden.py\n"
+            "@@\n"
+            "+assert value == 2\n"
+        )
+        sandbox = MemorySandbox(
+            {"app.py": "value = 1\n"},
+            {
+                "git apply .ead_hidden_test.patch": lambda box: CommandResult(
+                    1, "", box.read(".ead_hidden_test.patch"), 1.0
+                )
+            },
+        )
+        sandbox.create()
+        scenario = Scenario(
+            QuerySeed(PublicTaskContext("Set the value correctly.")),
+            EnvironmentSpec(name="evaluation-fixture", version="1"),
+            HiddenEvaluatorContext(hidden_tests=[], metadata={"test_patch": patch}),
+        )
+        instance = ScenarioInstance.materialize(
+            scenario, random_seed=3, initial_state_hash=sandbox.state_hash()
+        )
+
+        result = HiddenTestPatchEvaluator().evaluate(sandbox, instance)
+
+        self.assertFalse(result.passed)
+        self.assertNotIn(patch, result.evidence["stderr"])
+        self.assertIn("[redacted hidden context]", result.evidence["stderr"])
+
+    def test_evaluation_result_metrics_summarize_verifier_passes(self) -> None:
+        sandbox = _sandbox()
+        sandbox.write("app.py", "value = 2\n")
+        instance = _instance(sandbox.state_hash())
+
+        report = EvaluationSuite(
+            [
+                HiddenCommandEvaluator(["python", "-m", "hidden_test"]),
+                RequiredStateEvaluator(),
+            ]
+        ).evaluate(sandbox, instance)
+        metrics = evaluation_result_metrics(report)
+
+        self.assertEqual(metrics["verifier_hidden_command_passed"], 1.0)
+        self.assertEqual(metrics["verifier_required_state_passed"], 1.0)
+        self.assertEqual(metrics["verifier_all_non_agent_passed"], 1.0)
+
     def test_diagnostics_only_break_ties(self) -> None:
         sandbox = _sandbox()
         instance = _instance(sandbox.state_hash())
@@ -235,6 +331,14 @@ def _sandbox():
     )
     sandbox.create()
     return sandbox
+
+
+def _apply_hidden_test_patch(box):
+    patch = box.read(".ead_hidden_test.patch")
+    if "+assert value == 2" not in patch:
+        return CommandResult(1, "", "missing expected patch content", 1.0)
+    box.write("tests/test_hidden.py", "assert value == 2\n")
+    return CommandResult(0, "", "", 1.0)
 
 
 def _tools(sandbox):

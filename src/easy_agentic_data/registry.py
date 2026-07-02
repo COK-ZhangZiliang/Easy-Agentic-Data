@@ -9,7 +9,7 @@ import subprocess
 import tarfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from easy_agentic_data.environments import EnvironmentSpec, is_immutable_image_reference
@@ -270,7 +270,7 @@ def materialize_environment_source(environment: EnvironmentSpec, destination: st
                 if member_path.is_absolute() or ".." in member_path.parts:
                     raise ValueError(f"Unsafe repository archive path: {member.name}")
                 if member.issym() or member.islnk():
-                    raise ValueError(f"Repository archive links are not supported: {member.name}")
+                    _validate_archive_link(member)
             bundle.extractall(destination_path, members=members)
     else:
         shutil.copytree(repository, destination_path, dirs_exist_ok=True)
@@ -283,6 +283,27 @@ def materialize_environment_source(environment: EnvironmentSpec, destination: st
             capture_output=True,
         )
     return destination_path
+
+
+def _validate_archive_link(member: tarfile.TarInfo) -> None:
+    link = PurePosixPath(member.linkname)
+    if link.is_absolute():
+        raise ValueError(
+            f"Unsafe repository archive link target: {member.name} -> {member.linkname}"
+        )
+    member_parent = PurePosixPath(member.name).parent
+    resolved_parts = []
+    for part in (*member_parent.parts, *link.parts):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved_parts:
+                raise ValueError(
+                    f"Unsafe repository archive link target: {member.name} -> {member.linkname}"
+                )
+            resolved_parts.pop()
+        else:
+            resolved_parts.append(part)
 
 
 def mutation_seed(

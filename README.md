@@ -170,8 +170,10 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
 
 When Docker is running and a live DeepSeek key is available, add the thinking-enabled config to
 produce one real model/tool trajectory. For repository-specific images built locally, pass the
-content-addressed image id as `sha256:<image-id>` and use setup commands for offline workspace
-initialization before the agent starts:
+content-addressed image id as `sha256:<image-id>`. The Docker sandbox exposes `/workspace` on
+`PYTHONPATH`; add setup commands only for offline preparation that writes inside `/workspace`.
+For Python package metadata, install editable packages into the workspace prefix rather than the
+read-only container root filesystem:
 
 ```bash
 export DEEPSEEK_API_KEY=...
@@ -182,7 +184,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
   --config examples/deepseek-v4-flash-thinking.json \
   --trace runs/real-seed-demo/trace.jsonl \
   --image-digest sha256:<local-image-id> \
-  --setup-command 'python -m pip install --no-deps -e .' \
+  --setup-command 'python -m pip install --no-deps --no-build-isolation -e . --prefix /workspace/.ead_prefix' \
   --max-agent-tokens 200000
 ```
 
@@ -228,6 +230,14 @@ export DEEPSEEK_API_KEY=...
 ead run --config examples/deepseek-v4-flash.json
 ```
 
+On macOS, prefer keeping the DeepSeek key in Keychain and injecting it only for the command that
+needs it. The command substitution below must not be logged with shell tracing enabled:
+
+```bash
+DEEPSEEK_API_KEY="$(security find-generic-password -a "$USER" -s deepseek-api-key -w)" \
+  ead run --config examples/deepseek-v4-flash.json
+```
+
 If a managed network uses a private certificate authority, point `SSL_CERT_FILE` at an approved CA
 bundle. TLS verification remains enabled:
 
@@ -243,8 +253,10 @@ Evaluator-only and hidden-context reasoning must not be mixed into agent trainin
 thinking disabled unless a scenario benefits from it. See the [DeepSeek API documentation](https://api-docs.deepseek.com/)
 for current model and protocol details.
 
-Use `examples/deepseek-v4-flash-thinking.json` for live registry-backed coding trajectories that
-need thinking mode and tool calls. The config sets:
+Use `examples/deepseek-v4-flash-thinking.json` or
+`examples/deepseek-v4-pro-thinking.json` for live registry-backed coding trajectories that need
+thinking mode and tool calls. The Pro config uses DeepSeek's official `deepseek-v4-pro` model name.
+Both thinking configs set:
 
 ```json
 {
@@ -353,6 +365,204 @@ ead batch run \
   --trace-directory runs/traces
 
 ead batch status --database runs/jobs.sqlite3
+```
+
+For a 50-trace DeepSeek V4 Pro pilot on real registry-backed workspaces, first prepare 50 fixed
+seed/workspace pairs, enqueue one rollout per scenario, run with a conservative single worker, and
+write a quality report plus a deterministic human-review sample:
+
+```bash
+export DEEPSEEK_API_KEY=...
+export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
+  --output runs/ds-v4-pro-pilot-50 \
+  --dataset princeton-nlp/SWE-bench_Lite \
+  --split dev \
+  --limit 50
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch enqueue \
+  --registry runs/ds-v4-pro-pilot-50/registry \
+  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
+  --model deepseek-v4-pro \
+  --config-hash deepseek-v4-pro-thinking-v1 \
+  --rollouts 1
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
+  --registry runs/ds-v4-pro-pilot-50/registry \
+  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
+  --config examples/deepseek-v4-pro-thinking.json \
+  --trace-directory runs/ds-v4-pro-pilot-50/traces \
+  --max-workers 1 \
+  --max-jobs 50 \
+  --max-agent-tokens 250000
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch report \
+  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
+  --trace-directory runs/ds-v4-pro-pilot-50/traces \
+  --output runs/ds-v4-pro-pilot-50/quality-report.json \
+  --review-sample runs/ds-v4-pro-pilot-50/review-sample.jsonl \
+  --sample-size 10
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch audit-traces \
+  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
+  --trace-directory runs/ds-v4-pro-pilot-50/traces \
+  --output runs/ds-v4-pro-pilot-50/trace-logic-audit.json
+```
+
+When the key is stored in macOS Keychain, inject it for the paid batch command without writing it
+to shell startup files, tracked configs, logs, or run artifacts:
+
+```bash
+DEEPSEEK_API_KEY="$(security find-generic-password -a "$USER" -s deepseek-api-key -w)" \
+SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem \
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
+  --registry runs/ds-v4-pro-pilot-50/registry \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --config examples/deepseek-v4-pro-thinking.json \
+  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
+  --max-workers 2 \
+  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-index 0 \
+  --max-agent-tokens 350000 \
+  --max-agent-seconds 1200
+```
+
+Before scaling a paid provider run, select scenario groups that showed enough executable signal in
+the pilot instead of blindly amplifying every imported seed. The selector reports per-scenario
+success, hidden-test, agent-stop, infrastructure, token, and tool-call rates, then writes the
+scenario IDs that satisfy the configured thresholds:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch select-scale-candidates \
+  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
+  --audit runs/ds-v4-pro-pilot-50/trace-logic-audit.json \
+  --output runs/ds-v4-pro-pilot-50/scale-candidates.json \
+  --min-rollouts 2 \
+  --min-success-rate 0.5 \
+  --min-hidden-command-pass-rate 0.5 \
+  --min-all-non-agent-pass-rate 0.5 \
+  --min-agent-stop-rate 0.5 \
+  --min-high-quality-rate 0.5 \
+  --min-closed-loop-rate 0.8 \
+  --min-multi-step-complex-rate 0.8 \
+  --min-average-tool-calls 6
+```
+
+Use the selection file when creating the larger queue so low-signal or environment-noisy scenario
+groups do not consume the scale-up budget:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch enqueue \
+  --registry runs/ds-v4-pro-pilot-50/registry \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --model deepseek-v4-pro \
+  --config-hash deepseek-v4-pro-thinking-scale-v1 \
+  --rollouts 20 \
+  --selection-file runs/ds-v4-pro-pilot-50/scale-candidates.json
+```
+
+Estimate the queued scale-up before starting paid requests. The estimate uses observed pilot token
+usage per scenario and writes deterministic shards with explicit job IDs:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch estimate-scale \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --pilot-database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
+  --output runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-size 20
+```
+
+Check a shard before and after running it:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch shard-status \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-index 0 \
+  --output runs/ds-v4-pro-scale-candidates/shard-0-status.json
+```
+
+Preview the exact pending jobs before approving provider spend. Dry runs only read the scheduler and
+selection files; they do not load provider configuration, create Docker sandboxes, or call the
+model:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
+  --registry runs/ds-v4-pro-pilot-50/registry \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --config examples/deepseek-v4-pro-thinking.json \
+  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
+  --max-workers 2 \
+  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-index 0 \
+  --max-agent-tokens 350000 \
+  --max-agent-seconds 1200 \
+  --dry-run
+```
+
+After reviewing the estimate and approving provider spend, run one exact shard at a time:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
+  --registry runs/ds-v4-pro-pilot-50/registry \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --config examples/deepseek-v4-pro-thinking.json \
+  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
+  --max-workers 2 \
+  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-index 0 \
+  --max-agent-tokens 350000 \
+  --max-agent-seconds 1200
+```
+
+Then report only that shard before deciding whether to continue:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch report \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
+  --output runs/ds-v4-pro-scale-candidates/quality-report-shard-0.json \
+  --review-sample runs/ds-v4-pro-scale-candidates/review-sample-shard-0.jsonl \
+  --overwrite-review-sample \
+  --sample-size 10 \
+  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-index 0
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch audit-traces \
+  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
+  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
+  --output runs/ds-v4-pro-scale-candidates/trace-logic-audit-shard-0.json \
+  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
+  --shard-index 0
+```
+
+Gate the next shard on the completed shard's status and quality:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch decide-continuation \
+  --report runs/ds-v4-pro-scale-candidates/quality-report-shard-0.json \
+  --status runs/ds-v4-pro-scale-candidates/shard-0-status.json \
+  --audit runs/ds-v4-pro-scale-candidates/trace-logic-audit-shard-0.json \
+  --min-high-quality-rate 0.5 \
+  --min-closed-loop-rate 0.8 \
+  --min-multi-step-complex-rate 0.8 \
+  --output runs/ds-v4-pro-scale-candidates/decision-shard-0.json
+```
+
+For a single review artifact before spending on a shard, combine the pilot selection, queue
+estimate, shard status, trace audit, and continuation decision. A clean pre-run shard reports
+`pre_run_ready: true`; a completed shard that clears the quality gates reports
+`continuation_ready: true`:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli batch scale-readiness \
+  --selection runs/ds-v4-pro-pilot-50/scale-candidates.json \
+  --estimate runs/ds-v4-pro-scale-candidates/estimate.json \
+  --status runs/ds-v4-pro-scale-candidates/shard-0-status.json \
+  --audit runs/ds-v4-pro-scale-candidates/trace-logic-audit-shard-0.json \
+  --decision runs/ds-v4-pro-scale-candidates/decision-shard-0.json \
+  --output runs/ds-v4-pro-scale-candidates/readiness-shard-0.json
 ```
 
 ## Data Outputs
