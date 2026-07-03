@@ -442,6 +442,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add a CI-specific registry importer that maps failed workflow runs to `ci_build` seeds,
   stores `ci_commands` as hidden verifier evidence, and keeps CI records out of the public
   issue/PR importer.
+- [x] Add an optional import-rehearsal materialization gate that samples imported scenarios,
+  materializes local `file://` workspaces, and can run hidden verifier commands before rollout.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -499,6 +501,9 @@ Current checkpoint:
   workflow-run revisions and `ci_commands` evidence. These records are intentionally rejected by
   the public issue/PR importer; the `public_ci` importer now handles them as `ci_build` seeds with
   hidden-command verifier evidence.
+- `registry import-rehearsal` can now optionally materialize sampled imported scenarios and run
+  hidden verifier commands when records point at local `file://` workspaces. This gives production
+  source import an explicit pre-rollout workspace proof instead of relying on schema validity alone.
 - The latest anonymous GitHub API collection attempt covered and processed all 30 planned tasks
   after CI collection support. It added five PR records to the existing two-record probe, but 28
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
@@ -560,8 +565,9 @@ Immediate next execution plan:
 4. **CI source import and materialization validation**
    - Run `public_ci` import rehearsals separately from issue/PR shards so failed workflow runs are
      routed through the CI importer instead of the public issue/PR importer.
-   - Materialize sampled CI scenarios from fixed source revisions and confirm their `ci_commands`
-     run as hidden verifier commands in the target workspace.
+   - Use the import-rehearsal materialization gate on sampled CI scenarios from fixed source
+     revisions and confirm their `ci_commands` run as hidden verifier commands in the target
+     workspace.
    - Exit gate: CI records can be imported, materialized, reset, and verified without passing
      through the public issue/PR importer.
 
@@ -771,3 +777,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a reusable registry import rehearsal gate for audited public source records. |
 | 2026-07-03 | Added a CI source collection record contract while keeping CI records out of the issue/PR importer. |
 | 2026-07-03 | Added a CI registry importer for public workflow failure records. |
+| 2026-07-03 | Added an import-rehearsal materialization gate for sampled local workspaces. |

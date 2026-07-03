@@ -1,5 +1,8 @@
 import io
 import json
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -181,6 +184,132 @@ class SeedCorpusTests(unittest.TestCase):
             )
             self.assertEqual(scenario.query_seed.task_family, "ci_build")
             self.assertEqual(scenario.hidden_evaluator.hidden_tests, ["python -m pytest"])
+
+    def test_rehearse_registry_import_materializes_public_ci_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, commit = _write_git_repository(root)
+            source = root / "ci.jsonl"
+            allowlist = root / "allowlist.json"
+            ci_command = _python_command(
+                "from pathlib import Path; "
+                "assert Path('app.py').read_text(encoding='utf-8') == 'value = 1\\n'"
+            )
+            source.write_text(
+                json.dumps(
+                    {
+                        **_public_ci_record(),
+                        "source_uri": repository.as_uri(),
+                        "source_revision": commit,
+                        "ci_commands": [ci_command],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record(source_uri=repository.as_uri())]}),
+                encoding="utf-8",
+            )
+
+            rehearsal = rehearse_registry_import(
+                registry_root=root / "rehearsal",
+                source_path=source,
+                source_format="public-ci",
+                source_name="curated-public-ci",
+                allowlist_path=allowlist,
+                min_imported=1,
+                max_quarantined=0,
+                seed_policy=SeedLibraryPolicy(
+                    min_train_eligible=1,
+                    required_task_families=["ci_build"],
+                    required_verifier_types=["hidden_command"],
+                ),
+                materialize_sample_count=1,
+                materialize_root=root / "materialized",
+                run_hidden_commands=True,
+            )
+
+            materialization = rehearsal["materialization"]
+            result = materialization["results"][0]
+            self.assertTrue(rehearsal["valid"])
+            self.assertTrue(rehearsal["validation"]["materialization_valid"])
+            self.assertTrue(materialization["enabled"])
+            self.assertTrue(materialization["valid"])
+            self.assertEqual(materialization["sampled"], 1)
+            self.assertTrue(result["hidden_commands_ran"])
+            self.assertEqual(result["commands_run"], 1)
+            self.assertIn("command_sha256", result["command_results"][0])
+            self.assertNotIn("command", result["command_results"][0])
+            self.assertTrue((Path(result["workspace"]) / "app.py").is_file())
+
+    def test_cli_import_rehearsal_materializes_public_ci_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, commit = _write_git_repository(root)
+            source = root / "ci.jsonl"
+            allowlist = root / "allowlist.json"
+            output = root / "rehearsal.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        **_public_ci_record(),
+                        "source_uri": repository.as_uri(),
+                        "source_revision": commit,
+                        "ci_commands": [
+                            _python_command(
+                                "from pathlib import Path; assert Path('app.py').is_file()"
+                            )
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record(source_uri=repository.as_uri())]}),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "import-rehearsal",
+                        "--root",
+                        str(root / "rehearsal"),
+                        "--source",
+                        str(source),
+                        "--format",
+                        "public-ci",
+                        "--source-name",
+                        "curated-public-ci",
+                        "--allowlist",
+                        str(allowlist),
+                        "--min-imported",
+                        "1",
+                        "--max-quarantined",
+                        "0",
+                        "--require-task-family",
+                        "ci-build",
+                        "--require-verifier-type",
+                        "hidden-command",
+                        "--materialize-sample-count",
+                        "1",
+                        "--materialize-root",
+                        str(root / "materialized"),
+                        "--run-hidden-commands",
+                        "--output",
+                        str(output),
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload, json.loads(output.read_text(encoding="utf-8")))
+            self.assertTrue(payload["materialization"]["valid"])
+            self.assertTrue(payload["materialization"]["results"][0]["hidden_commands_ran"])
 
     def test_build_seed_corpus_imports_public_ci_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -395,10 +524,13 @@ def _seed_policy_for_public_probe():
     )
 
 
-def _allowlist_record() -> dict[str, object]:
+def _allowlist_record(
+    *,
+    source_uri: str = "https://github.com/example/tool.git",
+) -> dict[str, object]:
     return {
         "repository": "example/tool",
-        "source_uri": "https://github.com/example/tool.git",
+        "source_uri": source_uri,
         "license": "MIT",
         "language": "Python",
         "collection_sources": ["issues", "pull_requests"],
@@ -491,6 +623,31 @@ def _swe_bench_record() -> dict[str, object]:
         "image_digest": PINNED_IMAGE,
         "difficulty": 2,
     }
+
+
+def _write_git_repository(root: Path) -> tuple[Path, str]:
+    repository = root / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (repository / "app.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "app.py"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return repository, completed.stdout.strip()
+
+
+def _python_command(code: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
 if __name__ == "__main__":

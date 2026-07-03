@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import shutil
+import subprocess
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import asdict
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from easy_agentic_data.batch import enqueue_human_review
-from easy_agentic_data.registry import ScenarioRegistry
+from easy_agentic_data.registry import ScenarioRegistry, materialize_environment_source
 from easy_agentic_data.registry_sources import (
     DEFAULT_TRAIN_LICENSE_ALLOWLIST,
     PUBLIC_CI_FORMATS,
@@ -303,6 +305,9 @@ def rehearse_registry_import(
     max_quarantined: int = 0,
     seed_policy: SeedLibraryPolicy | None = None,
     benchmark_sources: Iterable[str] = DEFAULT_BENCHMARK_SOURCE_ALIASES,
+    materialize_sample_count: int = 0,
+    materialize_root: str | Path | None = None,
+    run_hidden_commands: bool = False,
 ) -> dict[str, Any]:
     """Import source records into a temporary registry and run pre-materialization gates."""
 
@@ -391,6 +396,13 @@ def rehearse_registry_import(
     )
     seed_audit_payload = seed_audit.to_dict()
     seed_audit_payload["train_verifier_type_counts"] = _train_verifier_type_counts(seeds)
+    materialization = _rehearse_materialization(
+        registry,
+        import_summary.scenario_ids,
+        sample_count=materialize_sample_count,
+        materialize_root=materialize_root or (root / "materialization-rehearsal"),
+        run_hidden_commands=run_hidden_commands,
+    )
     quarantined = import_summary.skipped
     if allowlist_filter is not None:
         quarantined += allowlist_filter.quarantined
@@ -405,6 +417,7 @@ def rehearse_registry_import(
         "quarantine_budget_valid": quarantined <= max(0, max_quarantined),
         "registry_valid": registry_validation.valid,
         "seed_audit_valid": seed_audit.valid,
+        "materialization_valid": materialization["valid"],
     }
     valid = all(validation.values())
     return {
@@ -426,6 +439,7 @@ def rehearse_registry_import(
         "registry_validation": _registry_validation_payload(registry_validation),
         "seed_policy": asdict(policy),
         "seed_audit": seed_audit_payload,
+        "materialization": materialization,
         "gate_issues": gate_issues,
         "validation": validation,
         "valid": valid,
@@ -465,6 +479,133 @@ def _import_rehearsal_gate_issues(
             }
         )
     return issues
+
+
+def _rehearse_materialization(
+    registry: ScenarioRegistry,
+    scenario_ids: Iterable[str],
+    *,
+    sample_count: int,
+    materialize_root: str | Path,
+    run_hidden_commands: bool,
+) -> dict[str, Any]:
+    requested = max(0, int(sample_count))
+    if requested == 0:
+        return {
+            "enabled": False,
+            "requested": 0,
+            "sampled": 0,
+            "root": "",
+            "run_hidden_commands": bool(run_hidden_commands),
+            "issues": [],
+            "results": [],
+            "valid": True,
+        }
+    root = Path(materialize_root)
+    root.mkdir(parents=True, exist_ok=True)
+    issues: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    selected = list(scenario_ids)[:requested]
+    for index, scenario_id in enumerate(selected):
+        scenario = registry.get_scenario(scenario_id)
+        destination = root / f"{index:04d}-{scenario_id}"
+        if destination.exists():
+            _ensure_safe_generated_root(destination)
+            shutil.rmtree(destination)
+        result = {
+            "scenario_id": scenario_id,
+            "environment_id": scenario.environment.environment_id,
+            "workspace": str(destination),
+            "source_uri": scenario.environment.source_uri,
+            "source_revision": scenario.environment.source_revision,
+            "hidden_command_count": len(scenario.hidden_evaluator.hidden_tests),
+            "hidden_commands_ran": False,
+            "commands_run": 0,
+            "valid": True,
+        }
+        try:
+            materialize_environment_source(scenario.environment, destination)
+            if run_hidden_commands:
+                _run_hidden_commands_for_rehearsal(
+                    scenario.hidden_evaluator.hidden_tests,
+                    destination,
+                    result,
+                )
+        except Exception as exc:  # noqa: BLE001 - convert any rehearsal failure into gate data.
+            result["valid"] = False
+            issue = {
+                "code": "materialization_rehearsal_failed",
+                "message": str(exc),
+                "scenario_id": scenario_id,
+                "severity": "error",
+            }
+            issues.append(issue)
+        results.append(result)
+    if len(selected) < requested:
+        issues.append(
+            {
+                "code": "materialization_sample_shortfall",
+                "message": (
+                    f"Requested {requested} materialization samples but only "
+                    f"{len(selected)} imported scenarios were available"
+                ),
+                "scenario_id": "",
+                "severity": "error",
+            }
+        )
+    return {
+        "enabled": True,
+        "requested": requested,
+        "sampled": len(selected),
+        "root": str(root),
+        "run_hidden_commands": bool(run_hidden_commands),
+        "issues": issues,
+        "results": results,
+        "valid": not issues,
+    }
+
+
+def _run_hidden_commands_for_rehearsal(
+    commands: Iterable[str],
+    workspace: Path,
+    result: dict[str, Any],
+) -> None:
+    command_list = list(commands)
+    if not command_list:
+        raise RuntimeError("Materialization rehearsal requested hidden commands, but none exist")
+    command_results = []
+    for command in command_list:
+        arguments = shlex.split(command)
+        if not arguments:
+            raise ValueError("Hidden verifier command cannot be empty")
+        completed = subprocess.run(
+            arguments,
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        command_results.append(
+            {
+                "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+                "exit_code": completed.returncode,
+                "stdout_sha256": hashlib.sha256(
+                    completed.stdout.encode("utf-8")
+                ).hexdigest(),
+                "stderr_sha256": hashlib.sha256(
+                    completed.stderr.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Hidden verifier command failed during materialization rehearsal "
+                f"(sha256={command_results[-1]['command_sha256']}, "
+                f"exit={completed.returncode})"
+            )
+    result["hidden_commands_ran"] = True
+    result["commands_run"] = len(command_results)
+    result["command_results"] = command_results
 
 
 def _import_record_sources(

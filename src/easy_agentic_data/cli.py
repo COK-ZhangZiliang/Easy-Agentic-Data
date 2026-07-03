@@ -328,6 +328,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     import_rehearsal_parser.add_argument("--max-source-method-share", type=float, default=1.0)
     import_rehearsal_parser.add_argument("--max-repository-share", type=float, default=1.0)
     import_rehearsal_parser.add_argument("--max-language-share", type=float, default=1.0)
+    import_rehearsal_parser.add_argument("--materialize-sample-count", type=int, default=0)
+    import_rehearsal_parser.add_argument("--materialize-root", default="")
+    import_rehearsal_parser.add_argument("--run-hidden-commands", action="store_true")
     import_rehearsal_parser.add_argument("--output", default="")
     allowlist_audit_parser = registry_subparsers.add_parser("allowlist-audit")
     allowlist_audit_parser.add_argument("--source", required=True)
@@ -796,6 +799,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_language_share=args.max_language_share,
                 ),
                 benchmark_sources=benchmark_sources,
+                materialize_sample_count=args.materialize_sample_count,
+                materialize_root=args.materialize_root or None,
+                run_hidden_commands=args.run_hidden_commands,
             )
             if args.output:
                 Path(args.output).parent.mkdir(parents=True, exist_ok=True)
