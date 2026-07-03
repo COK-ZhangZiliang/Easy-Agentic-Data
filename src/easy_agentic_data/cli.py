@@ -51,11 +51,9 @@ from easy_agentic_data.real_seed_sources import (
     SWE_BENCH_LITE_DATASET,
     prepare_real_seed_registry,
 )
-from easy_agentic_data.registry import ScenarioRegistry, materialize_environment_source
-from easy_agentic_data.repository_synthetic import (
-    DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST,
-    generate_repository_synthetic_scenarios,
-    load_repository_synthesis_specs,
+from easy_agentic_data.registry import (
+    ScenarioRegistry,
+    materialize_environment_source,
 )
 from easy_agentic_data.registry_sources import (
     DEFAULT_TRAIN_LICENSE_ALLOWLIST,
@@ -63,6 +61,11 @@ from easy_agentic_data.registry_sources import (
     import_public_issue_pr_records,
     import_swe_style_records,
     load_source_records,
+)
+from easy_agentic_data.repository_synthetic import (
+    DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST,
+    generate_repository_synthetic_scenarios,
+    load_repository_synthesis_specs,
 )
 from easy_agentic_data.sandbox import DockerSandbox, SandboxLimits
 from easy_agentic_data.scenario_decontamination import (
@@ -1110,7 +1113,11 @@ def _run_registry_scenario(
 ) -> RolloutOutcome:
     scenario = registry.get_scenario(scenario_id)
     with tempfile.TemporaryDirectory() as directory:
-        source = materialize_environment_source(scenario.environment, directory)
+        source = materialize_environment_source(
+            scenario.environment,
+            directory,
+            run_health_checks=False,
+        )
         limits = SandboxLimits(**scenario.environment.resource_limits)
         sandbox = DockerSandbox(
             image_digest=scenario.environment.image_digest,
@@ -1121,6 +1128,7 @@ def _run_registry_scenario(
         sandbox.create()
         try:
             _run_setup_commands(sandbox, scenario.environment.setup_commands)
+            _run_health_check_commands(sandbox, scenario.environment.health_check)
             instance = registry.materialize(
                 scenario_id,
                 random_seed=random_seed,
@@ -1216,6 +1224,17 @@ def _run_setup_commands(sandbox: DockerSandbox, commands: Sequence[str]) -> None
         if result.exit_code != 0:
             raise RuntimeError(
                 "Environment setup command failed "
+                f"({command!r}, exit={result.exit_code}): "
+                f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            )
+
+
+def _run_health_check_commands(sandbox: DockerSandbox, commands: Sequence[str]) -> None:
+    for command in commands:
+        result = sandbox.execute(shlex.split(command))
+        if result.exit_code != 0:
+            raise RuntimeError(
+                "Environment health check failed "
                 f"({command!r}, exit={result.exit_code}): "
                 f"stdout={result.stdout!r} stderr={result.stderr!r}"
             )

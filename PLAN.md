@@ -79,9 +79,9 @@ The first production-capable release must:
   `tests/test_seed_library_rollouts.py`
 
 The core P0-P4 architecture and the P5 scheduler are implemented. Production integration remains
-for registry health checks, independent resource gates, call caching, hard budget admission,
-quality-report commands, and production seed-corpus population. The
-lightweight `AgentRunner` pipeline remains as a dependency-free demonstration path, while
+for independent resource gates, call caching, hard budget admission, quality-report commands, and
+production seed-corpus population. The lightweight `AgentRunner` pipeline remains as a
+dependency-free demonstration path, while
 `HeadlessAgent` is the scenario-bound runtime for sandboxed coding trajectories.
 
 ## Architecture Boundaries
@@ -223,7 +223,7 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
   be initialized offline from prebuilt images.
 - [x] Add semantic and exact duplicate detection hooks.
 - [x] Add CLI commands to list, validate, materialize, and inspect registry entries.
-- [ ] Execute each environment `health_check` during materialization and repeated reset validation.
+- [x] Execute each environment `health_check` during materialization and repeated reset validation.
 
 ### Deliverables
 
@@ -235,8 +235,8 @@ networking, resource settings, workspace reset, Git diff, headless-agent repair,
 
 - Every scenario can be recreated from registry metadata and content-addressed artifacts.
 - Registry validation detects train/evaluation leakage by source and content hash.
-- Twenty in-memory reset fixtures currently reproduce identical state. Registry-backed health-check
-  execution remains open.
+- Twenty in-memory reset fixtures reproduce identical state, and registry-backed materialization
+  runs environment health checks before accepting a workspace.
 
 ## P3: Simulated User and Multi-Turn Interaction
 
@@ -437,6 +437,71 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   trace-logic audits, and scale-readiness checks before launching larger shards.
 - [ ] Freeze a seed-corpus manifest with registry root, source snapshots, prompt/config versions,
   audit outputs, review sample path, and approved scale-up decision.
+
+### Detailed Execution Plan
+
+1. **Corpus budget and source policy**
+   - Define the initial scale target, minimum count per supported task family, required verifier
+     types, language quotas, maximum repository share, maximum source-method share, and minimum
+     license metadata completeness.
+   - Produce a checked-in policy example and a run-specific private data manifest that maps each
+     source to its license, collection method, fixed revision rule, and permitted-use notes.
+   - Exit gate: no collection starts until the budget can be evaluated by `registry seed-audit`.
+
+2. **Repository allowlist and record collection**
+   - Build the first allowlist from permissively licensed public repositories with active issue/PR
+     history, stable test commands, reproducible commits, and no known benchmark membership.
+   - Collect issue, PR, CI, review, and release-migration records into local JSONL files with
+     source URLs, source-instance IDs, repository revision, language, labels, candidate verifier
+     commands, and provenance hashes.
+   - Quarantine records that are missing a license, contain personal data or credentials, use
+     mutable revisions, reference private URLs, duplicate held-out sources, or cannot identify a
+     reproducible workspace.
+   - Exit gate: imported records must pass registry validation and quarantine accounting must be
+     reported before any model rollout.
+
+3. **Synthetic coverage backfill**
+   - Use repository-grounded synthesis only for under-covered task families or difficulty bands,
+     starting from fixed repository snapshots rather than benchmark rows.
+   - Require each synthetic seed to include family-specific executable evidence such as hidden
+     commands, doctests, adversarial tests, benchmark thresholds, diff constraints, or retrieval
+     requirements.
+   - Exit gate: synthetic seeds must be distinguishable by `source_method`, auditable by coverage
+     tag, and never used to satisfy a verifier requirement they do not actually exercise.
+
+4. **Registry materialization and reset health**
+   - Materialize train seeds into `runs/train-registry` or an explicitly configured external data
+     root, then run setup commands and environment health checks before accepting each workspace.
+   - Run repeated reset validation for sampled environments so drift caused by setup scripts,
+     generated files, timestamps, or repository state is detected before synthesis.
+   - Exit gate: every accepted environment has a fixed source revision, deterministic reset hash,
+     and passing health-check evidence.
+
+5. **Holdout construction and decontamination**
+   - Build a separate holdout registry from benchmarks and curated non-train sources while keeping
+     hidden tests, reference patches, and evaluator-only facts outside train prompts and traces.
+   - Run seed-level and scenario-level audits for query, provenance, source-instance, hidden-test,
+     reference-artifact, oracle-hash, and patch/test-patch overlap.
+   - Exit gate: any contamination hit blocks scale-up until the record is removed, relabeled
+     non-train, or explicitly quarantined.
+
+6. **Human review and pilot rollout**
+   - Generate a stratified review queue across task family, difficulty, source method, verifier
+     type, repository, and language before spending on large provider shards.
+   - Run a small DeepSeek V4 Pro pilot across all supported task families, then inspect quality
+     reports for tool success, reward distribution, trace validity, failure taxonomy, and prompt or
+     verifier leakage.
+   - Exit gate: reviewers approve the sampled seeds and the pilot meets the configured success,
+     cost, and trace-quality thresholds.
+
+7. **Freeze and scale decision**
+   - Freeze a seed-corpus manifest containing registry roots, source snapshots, prompt/config
+     versions, audit outputs, review queue path, reviewer summary, pilot selection, model/provider
+     settings, and the approved scale-up decision.
+   - Only launch larger shards from a frozen manifest so later training examples can be traced back
+     to the exact seed corpus and quality gates that authorized them.
+   - Exit gate: the manifest is immutable for a shard, and any corpus change creates a new manifest
+     version rather than mutating the previous one.
 
 ### Deliverables
 

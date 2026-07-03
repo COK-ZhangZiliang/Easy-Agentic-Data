@@ -1,4 +1,6 @@
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,7 @@ from easy_agentic_data.registry import (
     materialize_environment_source,
     mutation_seed,
     semantic_duplicate_candidates,
+    validate_environment_resets,
 )
 from easy_agentic_data.sandbox import MemorySandbox
 from easy_agentic_data.scenarios import Scenario
@@ -142,6 +145,81 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsafe repository archive link target"):
                 materialize_environment_source(environment, Path(directory) / "materialized")
 
+    def test_materialize_runs_environment_health_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            (repository / "app.py").write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "app.py"], check=True)
+            subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
+            base = import_repository_environment(repository, "HEAD", name="fixture")
+            environment = EnvironmentSpec(
+                name=base.name,
+                version=base.version,
+                source_uri=base.source_uri,
+                source_revision=base.source_revision,
+                health_check=[
+                    _python_command(
+                        "from pathlib import Path; "
+                        "assert Path('app.py').read_text(encoding='utf-8') == 'value = 1\\n'"
+                    )
+                ],
+            )
+
+            materialized = Path(directory) / "materialized"
+            materialize_environment_source(environment, materialized)
+
+            self.assertEqual((materialized / "app.py").read_text(encoding="utf-8"), "value = 1\n")
+
+    def test_materialize_fails_fast_when_environment_health_check_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = EnvironmentSpec(
+                name="bad-health",
+                version="1",
+                health_check=[_python_command("raise SystemExit(7)")],
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Environment health check failed"):
+                materialize_environment_source(environment, Path(directory) / "materialized")
+
+    def test_reset_validation_repeats_health_checks_and_detects_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stable = EnvironmentSpec(
+                name="stable-health",
+                version="1",
+                health_check=[
+                    _python_command(
+                        "from pathlib import Path; "
+                        "Path('health.txt').write_text('ok\\n', encoding='utf-8')"
+                    )
+                ],
+            )
+            drifting = EnvironmentSpec(
+                name="drifting-health",
+                version="1",
+                health_check=[
+                    _python_command(
+                        "from pathlib import Path; "
+                        "Path('health.txt').write_text(str(Path.cwd()), encoding='utf-8')"
+                    )
+                ],
+            )
+
+            hashes = validate_environment_resets(stable, Path(directory) / "stable", attempts=3)
+
+            self.assertEqual(len(hashes), 3)
+            self.assertEqual(len(set(hashes)), 1)
+            with self.assertRaisesRegex(RuntimeError, "inconsistent workspace state"):
+                validate_environment_resets(drifting, Path(directory) / "drifting", attempts=2)
+
     def test_twenty_fixture_scenarios_reset_to_identical_health_state(self) -> None:
         seeds = []
         for index in range(20):
@@ -155,6 +233,10 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(sandbox.read("health.txt"), f"ok-{index}\n")
             seeds.append(QuerySeed(PublicTaskContext(f"Repair fixture parser {index}")))
         self.assertTrue(semantic_duplicate_candidates(seeds))
+
+
+def _python_command(code: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
 if __name__ == "__main__":

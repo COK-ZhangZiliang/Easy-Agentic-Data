@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import tarfile
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -267,10 +270,17 @@ def import_repository_environment(
     )
 
 
-def materialize_environment_source(environment: EnvironmentSpec, destination: str | Path) -> Path:
+def materialize_environment_source(
+    environment: EnvironmentSpec,
+    destination: str | Path,
+    *,
+    run_health_checks: bool = True,
+) -> Path:
     destination_path = Path(destination)
     destination_path.mkdir(parents=True, exist_ok=True)
     if not environment.source_uri:
+        if run_health_checks:
+            run_environment_health_checks(environment, destination_path)
         return destination_path
     if not environment.source_uri.startswith("file://"):
         raise ValueError(
@@ -302,7 +312,50 @@ def materialize_environment_source(environment: EnvironmentSpec, destination: st
             text=True,
             capture_output=True,
         )
+    if run_health_checks:
+        run_environment_health_checks(environment, destination_path)
     return destination_path
+
+
+def run_environment_health_checks(environment: EnvironmentSpec, workspace: str | Path) -> None:
+    workspace_path = Path(workspace)
+    for command in environment.health_check:
+        arguments = _command_arguments(command, field_name="health_check")
+        completed = subprocess.run(
+            arguments,
+            cwd=workspace_path,
+            text=True,
+            capture_output=True,
+            timeout=_environment_timeout_seconds(environment),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Environment health check failed "
+                f"({command!r}, exit={completed.returncode}): "
+                f"stdout={_bounded_output(completed.stdout)!r} "
+                f"stderr={_bounded_output(completed.stderr)!r}"
+            )
+
+
+def validate_environment_resets(
+    environment: EnvironmentSpec,
+    workspace_root: str | Path,
+    *,
+    attempts: int = 2,
+) -> list[str]:
+    if attempts < 2:
+        raise ValueError("Reset validation requires at least two attempts")
+    root = Path(workspace_root)
+    root.mkdir(parents=True, exist_ok=True)
+    hashes: list[str] = []
+    with tempfile.TemporaryDirectory(dir=root) as directory:
+        for index in range(attempts):
+            destination = Path(directory) / f"reset-{index}"
+            materialize_environment_source(environment, destination)
+            hashes.append(_workspace_tree_hash(destination))
+    if len(set(hashes)) != 1:
+        raise RuntimeError("Environment reset validation produced inconsistent workspace state")
+    return hashes
 
 
 def _validate_archive_link(member: tarfile.TarInfo) -> None:
@@ -324,6 +377,57 @@ def _validate_archive_link(member: tarfile.TarInfo) -> None:
             resolved_parts.pop()
         else:
             resolved_parts.append(part)
+
+
+def _command_arguments(command: str, *, field_name: str) -> list[str]:
+    arguments = shlex.split(command)
+    if not arguments:
+        raise ValueError(f"Environment {field_name} command cannot be empty")
+    return arguments
+
+
+def _environment_timeout_seconds(environment: EnvironmentSpec) -> float:
+    value = environment.resource_limits.get("timeout_seconds", 30.0)
+    return float(value)
+
+
+def _bounded_output(value: str, limit: int = 4000) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="replace")
+
+
+def _workspace_tree_hash(root: Path) -> str:
+    entries: list[dict[str, str]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if _is_git_path(relative):
+            continue
+        if path.is_symlink():
+            entries.append(
+                {
+                    "path": relative,
+                    "type": "symlink",
+                    "target": path.readlink().as_posix(),
+                }
+            )
+        elif path.is_file():
+            entries.append(
+                {
+                    "path": relative,
+                    "type": "file",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        elif path.is_dir():
+            entries.append({"path": relative, "type": "dir"})
+    payload = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _is_git_path(relative: str) -> bool:
+    return relative == ".git" or relative.startswith(".git/")
 
 
 def mutation_seed(
