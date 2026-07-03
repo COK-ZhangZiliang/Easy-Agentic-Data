@@ -91,11 +91,16 @@ class SourceExportSummary:
     source_type_counts: dict[str, int] = field(default_factory=dict)
     repository_counts: dict[str, int] = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
+    blocking_issues: list[str] = field(default_factory=list)
     task_outcomes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
-        return self.exported > 0 and (self.allow_partial or not self.issues)
+        return (
+            self.exported > 0
+            and not self.blocking_issues
+            and (self.allow_partial or not self.issues)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -276,6 +281,7 @@ def export_public_source_records(
     allow_partial: bool = False,
     fixture_root: str | Path | None = None,
     github_token_env: str = "",
+    require_github_token: bool = False,
     timeout_seconds: float = 30.0,
 ) -> SourceExportSummary:
     """Export public issue/PR records from a collection plan into JSONL."""
@@ -283,6 +289,19 @@ def export_public_source_records(
     tasks = list(collection_plan.get("tasks", []))
     output = Path(output_path)
     selected_tasks = _selected_tasks(tasks, task_offset=task_offset, max_tasks=max_tasks)
+    start_offset = max(0, task_offset)
+    if not fixture_root and require_github_token:
+        token_issue = _github_token_issue(github_token_env)
+        if token_issue:
+            return SourceExportSummary(
+                plan_tasks=len(tasks),
+                task_offset=start_offset,
+                max_tasks=max_tasks if max_tasks is None else max(0, max_tasks),
+                selected_tasks=len(selected_tasks),
+                allow_partial=allow_partial,
+                output_path=str(output),
+                blocking_issues=[token_issue],
+            )
     client: _SourceClient
     if fixture_root:
         client = _FixtureSourceClient(Path(fixture_root))
@@ -306,7 +325,6 @@ def export_public_source_records(
     skipped_records = 0
     processed_tasks = 0
     task_outcomes: list[dict[str, Any]] = []
-    start_offset = max(0, task_offset)
 
     for task_index, task in enumerate(selected_tasks):
         absolute_task_index = start_offset + task_index
@@ -376,6 +394,7 @@ def export_public_source_records(
         source_type_counts=dict(sorted(source_type_counts.items())),
         repository_counts=dict(sorted(repository_counts.items())),
         issues=issues,
+        blocking_issues=[],
         task_outcomes=task_outcomes,
     )
 
@@ -770,6 +789,14 @@ def _source_task_outcome(task: dict[str, Any], task_index: int) -> dict[str, Any
         "skipped_records": 0,
         "issue": "",
     }
+
+
+def _github_token_issue(github_token_env: str) -> str:
+    if not github_token_env:
+        return "missing_github_token_env: --require-github-token needs --github-token-env"
+    if not os.environ.get(github_token_env, "").strip():
+        return f"missing_github_token: environment variable {github_token_env} is not set"
+    return ""
 
 
 def _task_outcome_index(

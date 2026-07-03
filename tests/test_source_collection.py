@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -493,6 +494,52 @@ class SourceCollectionTests(unittest.TestCase):
             )
             self.assertEqual(summary["task_outcomes"][0]["new_records"], 1)
             self.assertIn("collection-task_", summary["task_outcomes"][1]["issue"])
+
+    def test_cli_collection_export_requires_github_token_when_requested(self) -> None:
+        env_name = "EAD_TEST_MISSING_GITHUB_TOKEN"
+        old_value = os.environ.pop(env_name, None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan_output = root / "plan.json"
+                export_output = root / "exports.jsonl"
+                summary_output = root / "summary.json"
+                plan = build_source_collection_plan(
+                    [_allowlist_record()],
+                    output_root=root / "exports",
+                    source_name="curated-public-sources",
+                )
+                plan_output.write_text(json.dumps(plan), encoding="utf-8")
+
+                with redirect_stdout(io.StringIO()):
+                    exit_code = main(
+                        [
+                            "registry",
+                            "collection-export",
+                            "--plan",
+                            str(plan_output),
+                            "--output",
+                            str(export_output),
+                            "--summary-output",
+                            str(summary_output),
+                            "--github-token-env",
+                            env_name,
+                            "--require-github-token",
+                        ]
+                    )
+
+                summary = json.loads(summary_output.read_text(encoding="utf-8"))
+                self.assertEqual(exit_code, 2)
+                self.assertFalse(summary["valid"])
+                self.assertEqual(summary["exported"], 0)
+                self.assertEqual(
+                    summary["blocking_issues"],
+                    [f"missing_github_token: environment variable {env_name} is not set"],
+                )
+                self.assertFalse(export_output.exists())
+        finally:
+            if old_value is not None:
+                os.environ[env_name] = old_value
 
     def test_cli_collection_retry_plan_assigns_explicit_retry_shards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

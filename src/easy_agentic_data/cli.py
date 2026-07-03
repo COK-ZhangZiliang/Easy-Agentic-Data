@@ -366,6 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_export_parser.add_argument("--summary-output", default="")
     collection_export_parser.add_argument("--fixture-root", default="")
     collection_export_parser.add_argument("--github-token-env", default="")
+    collection_export_parser.add_argument("--require-github-token", action="store_true")
     collection_export_parser.add_argument("--timeout-seconds", type=float, default=30.0)
     collection_retry_parser = registry_subparsers.add_parser("collection-retry-plan")
     collection_retry_parser.add_argument("--plan", required=True)
@@ -735,6 +736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allow_partial=args.allow_partial,
                 fixture_root=args.fixture_root or None,
                 github_token_env=args.github_token_env,
+                require_github_token=args.require_github_token,
                 timeout_seconds=args.timeout_seconds,
             )
             payload = summary.to_dict()

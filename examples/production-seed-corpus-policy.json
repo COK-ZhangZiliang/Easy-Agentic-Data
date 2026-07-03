@@ -72,7 +72,7 @@
     "approved_for_scale": false,
     "remaining_requirements": [
       "Add non-Python or cross-language sources before applying the 80% maximum language-share gate to the full corpus.",
-      "Run resumable collection-export shards, collection-retry-plan, collection-audit, collection-readiness, collection-split, and format-specific import rehearsals for public issue, PR, and CI records from fixed commits.",
+      "Run authenticated resumable collection-export shards with required GitHub token gating, collection-retry-plan, collection-audit, collection-readiness, collection-split, and format-specific import rehearsals for public issue, PR, and CI records from fixed commits.",
       "Run CI-specific import rehearsals with sampled materialization checks on production CI records before using them as trainable source records.",
       "Generate repository-grounded synthetic backfill only for under-covered families and verifier types.",
       "Materialize train and holdout registries, then run seed and scenario decontamination audits.",

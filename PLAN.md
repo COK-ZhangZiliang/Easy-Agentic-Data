@@ -448,6 +448,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   shards before format-specific import rehearsals.
 - [x] Add per-task collection export outcomes and a retry-plan gate that maps failed, skipped, and
   unselected source-collection tasks to explicit retry shards.
+- [x] Add a production collection authentication gate so `collection-export` can require a
+  configured GitHub token before making network requests.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -494,6 +496,9 @@ Current checkpoint:
 - New export summaries include per-task outcomes, and `registry collection-retry-plan` turns
   failed, skipped, and unselected source-collection tasks into exact retry shards with task IDs,
   repositories, source types, and `--task-offset N --max-tasks 1` arguments.
+- Production `collection-export` runs can now use `--require-github-token` with
+  `--github-token-env GITHUB_TOKEN` to fail locally when authenticated collection is not
+  configured, instead of silently falling back to anonymous GitHub API limits.
 - `registry collection-readiness` now combines the collection plan, export summary, and collection
   audit into a registry-import gate with accepted-record, quarantine, source-type, clean-export,
   and full-plan coverage thresholds.
@@ -551,6 +556,8 @@ Immediate next execution plan:
 1. **Authenticated source collection**
    - Run resumable `collection-export` shards with a GitHub token, fixed task offsets, conservative
      sleep throttling, and `--allow-partial` so rate-limited tasks remain visible in the summary.
+   - Use `--require-github-token --github-token-env GITHUB_TOKEN` for production shards so missing
+     authentication fails before any anonymous GitHub API request is made.
    - Run `collection-retry-plan` after every shard or combined summary so failed, skipped, and
      not-yet-selected tasks are assigned to explicit single-task retry shards.
    - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
@@ -792,3 +799,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added an import-rehearsal materialization gate for sampled local workspaces. |
 | 2026-07-03 | Added a source-record split gate for issue/PR and CI import-rehearsal shards. |
 | 2026-07-03 | Added per-task source export outcomes and retry planning for incomplete collection shards. |
+| 2026-07-03 | Added a GitHub token requirement gate for production source collection exports. |

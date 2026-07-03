@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-181%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-182%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -256,6 +256,8 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-export \
   --plan runs/seed-corpus-demo/production-source-collection-plan.json \
   --output runs/seed-corpus-demo/production-public-source-records.jsonl \
   --summary-output runs/seed-corpus-demo/production-source-export-summary.json \
+  --github-token-env GITHUB_TOKEN \
+  --require-github-token \
   --limit-per-task 5 \
   --max-tasks 4 \
   --resume \
@@ -327,13 +329,15 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
 
 `collection-export` reads the plan and writes normalized public issue/PR JSONL records. It can use
 unauthenticated GitHub API access for small probes, or a token read from an environment variable
-with `--github-token-env GITHUB_TOKEN` when rate limits require it. Use `--max-tasks`,
-`--task-offset`, `--resume`, and `--sleep-seconds` to shard and resume collection without
-duplicating source-instance IDs. `--allow-partial` is useful for rate-limited runs because valid
-records are still written and can be audited while failed tasks remain visible in the summary.
-Each new export summary includes per-task outcomes. `collection-retry-plan` turns failed, skipped,
-or not-yet-selected collection tasks into explicit retry shards with task IDs, repositories,
-source types, and `--task-offset N --max-tasks 1` arguments. CI collection tasks export
+with `--github-token-env GITHUB_TOKEN` when rate limits require it. Production runs should also
+set `--require-github-token` so a missing token fails locally before any anonymous request can
+create misleading rate-limit summaries. Use `--max-tasks`, `--task-offset`, `--resume`, and
+`--sleep-seconds` to shard and resume collection without duplicating source-instance IDs.
+`--allow-partial` is useful for rate-limited runs because valid records are still written and can
+be audited while failed tasks remain visible in the summary. Each new export summary includes
+per-task outcomes. `collection-retry-plan` turns failed, skipped, or not-yet-selected collection
+tasks into explicit retry shards with task IDs, repositories, source types, and
+`--task-offset N --max-tasks 1` arguments. CI collection tasks export
 `public_ci` records from failed workflow runs with fixed head SHAs and `ci_commands` verifier
 evidence. Import issue/PR and CI records through their matching formats: the public issue/PR
 importer still rejects CI records, while `--format public-ci` maps CI commands to hidden verifier
