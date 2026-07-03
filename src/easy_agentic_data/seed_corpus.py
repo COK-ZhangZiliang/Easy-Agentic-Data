@@ -1,0 +1,603 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from collections import Counter
+from collections.abc import Iterable
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from easy_agentic_data.batch import enqueue_human_review
+from easy_agentic_data.registry import ScenarioRegistry
+from easy_agentic_data.registry_sources import (
+    DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+    PUBLIC_ISSUE_PR_FORMATS,
+    RegistryImportSummary,
+    import_public_issue_pr_records,
+    import_swe_style_records,
+    load_source_records,
+)
+from easy_agentic_data.repository_synthetic import (
+    DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST,
+    RepositorySyntheticSummary,
+    generate_repository_synthetic_scenarios,
+    load_repository_synthesis_specs,
+)
+from easy_agentic_data.scenario_decontamination import (
+    audit_scenario_decontamination,
+    scenarios_from_registry,
+)
+from easy_agentic_data.seed_library import (
+    DEFAULT_BENCHMARK_SOURCE_ALIASES,
+    SeedLibraryPolicy,
+    audit_seed_library,
+)
+from easy_agentic_data.seed_review import build_seed_review_queue
+
+SEED_CORPUS_SCHEMA_VERSION = "easy_agentic_data.seed_corpus.v1"
+
+
+def build_seed_corpus(
+    config_path: str | Path,
+    *,
+    manifest_output: str | Path | None = None,
+    overwrite_outputs: bool = False,
+) -> dict[str, Any]:
+    """Build train and holdout registries from a seed-corpus config and freeze a manifest."""
+
+    config_file = Path(config_path)
+    config = _read_json(config_file)
+    config_dir = config_file.parent
+    overwrite = overwrite_outputs or bool(config.get("overwrite_outputs", False))
+    overwrite_registries = bool(config.get("overwrite_registries", False))
+    train_root = _required_path(config_dir, config, "train_registry_root")
+    holdout_root = _optional_path(config_dir, config.get("holdout_registry_root"))
+
+    _prepare_registry_root(train_root, overwrite=overwrite_registries)
+    if holdout_root is not None:
+        _prepare_registry_root(holdout_root, overwrite=overwrite_registries)
+    train_registry = ScenarioRegistry(train_root)
+    train_registry.initialize()
+    holdout_registry = ScenarioRegistry(holdout_root) if holdout_root is not None else None
+    if holdout_registry is not None:
+        holdout_registry.initialize()
+
+    import_summaries = []
+    import_summaries.extend(
+        _import_record_sources(
+            train_registry,
+            _dict_list(config.get("public_issue_sources")),
+            config_dir=config_dir,
+            default_format="public_issue_pr",
+            default_split="train",
+            default_train_eligible=None,
+        )
+    )
+    import_summaries.extend(
+        _import_record_sources(
+            train_registry,
+            _dict_list(config.get("swe_style_sources")),
+            config_dir=config_dir,
+            default_format="auto",
+            default_split="train",
+            default_train_eligible=None,
+        )
+    )
+    synthetic_summaries = _generate_synthetic_sources(
+        train_registry,
+        _dict_list(config.get("repository_synthetic_sources")),
+        config_dir=config_dir,
+        default_split="train",
+        default_train_eligible=None,
+    )
+    holdout_summaries: list[dict[str, Any]] = []
+    if holdout_registry is not None:
+        holdout_summaries.extend(
+            summary.to_dict()
+            for summary in _import_record_sources(
+                holdout_registry,
+                _dict_list(config.get("holdout_sources")),
+                config_dir=config_dir,
+                default_format="auto",
+                default_split="evaluation",
+                default_train_eligible=False,
+            )
+        )
+
+    benchmark_sources = sorted(
+        set(DEFAULT_BENCHMARK_SOURCE_ALIASES)
+        | set(_string_list(config.get("benchmark_sources")))
+    )
+    train_validation = train_registry.validate()
+    holdout_validation = holdout_registry.validate() if holdout_registry is not None else None
+    train_seeds = train_registry.list_seeds()
+    holdout_seeds = list(train_seeds)
+    if holdout_registry is not None:
+        holdout_seeds.extend(holdout_registry.list_seeds())
+    seed_policy = _seed_policy(config.get("seed_policy", {}))
+    seed_audit = audit_seed_library(
+        train_seeds,
+        benchmark_sources=benchmark_sources,
+        policy=seed_policy,
+        holdout_seeds=holdout_seeds,
+    )
+    seed_audit_payload = seed_audit.to_dict()
+    seed_audit_payload["train_verifier_type_counts"] = _train_verifier_type_counts(train_seeds)
+    train_scenarios = scenarios_from_registry(train_registry)
+    holdout_scenarios = list(train_scenarios)
+    if holdout_registry is not None:
+        holdout_scenarios.extend(scenarios_from_registry(holdout_registry))
+    scenario_audit = audit_scenario_decontamination(
+        train_scenarios,
+        benchmark_sources=benchmark_sources,
+        holdout_scenarios=holdout_scenarios,
+    )
+    quarantine = _quarantine_summary(import_summaries, synthetic_summaries, holdout_summaries)
+    coverage_budget = _coverage_budget_report(
+        seed_audit_payload,
+        config.get("coverage_budgets", {}),
+        quarantine_count=int(quarantine["records"]),
+    )
+    review_config = _dict(config.get("review", {}))
+    review_queue = build_seed_review_queue(
+        train_scenarios,
+        sample_per_stratum=_int(review_config.get("sample_per_stratum"), default=1),
+        max_records=_optional_int(review_config.get("max_records")),
+    )
+    review_output = _optional_path(config_dir, review_config.get("output"))
+    if review_output is None:
+        review_output = _optional_path(config_dir, config.get("review_queue_output"))
+    if review_output is not None:
+        if overwrite:
+            review_output.unlink(missing_ok=True)
+        for record in review_queue.records:
+            enqueue_human_review(review_output, record)
+
+    seed_audit_output = _optional_path(config_dir, config.get("seed_audit_output"))
+    scenario_audit_output = _optional_path(config_dir, config.get("scenario_audit_output"))
+    _write_optional_json(seed_audit_output, seed_audit_payload)
+    _write_optional_json(scenario_audit_output, scenario_audit.to_dict())
+
+    scale_decision = _dict(config.get("scale_decision", {}))
+    validation = {
+        "registry_valid": train_validation.valid
+        and (holdout_validation.valid if holdout_validation is not None else True),
+        "seed_audit_valid": seed_audit.valid,
+        "scenario_audit_valid": scenario_audit.valid,
+        "coverage_budget_valid": coverage_budget["valid"],
+        "review_queue_valid": review_queue.selected > 0
+        or not bool(review_config.get("required", True)),
+    }
+    valid = all(validation.values())
+    manifest_path = (
+        Path(manifest_output)
+        if manifest_output is not None
+        else _optional_path(config_dir, config.get("manifest_output"))
+    )
+    if manifest_path is None:
+        manifest_path = train_root.parent / "seed-corpus-manifest.json"
+    manifest = {
+        "schema_version": SEED_CORPUS_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "path": str(config_file),
+            "sha256": _file_sha256(config_file),
+        },
+        "train_registry_root": str(train_root),
+        "holdout_registry_root": str(holdout_root) if holdout_root is not None else "",
+        "benchmark_sources": benchmark_sources,
+        "source_snapshots": _source_snapshots(config, config_dir),
+        "imports": [summary.to_dict() for summary in import_summaries],
+        "synthetic_generation": [summary.to_dict() for summary in synthetic_summaries],
+        "holdout_imports": holdout_summaries,
+        "quarantine": quarantine,
+        "registry_validation": {
+            "train": _registry_validation_payload(train_validation),
+            "holdout": _registry_validation_payload(holdout_validation)
+            if holdout_validation is not None
+            else None,
+        },
+        "seed_policy": asdict(seed_policy),
+        "coverage_budget": coverage_budget,
+        "seed_audit": seed_audit_payload,
+        "seed_audit_output": str(seed_audit_output) if seed_audit_output else "",
+        "scenario_audit": scenario_audit.to_dict(),
+        "scenario_audit_output": str(scenario_audit_output) if scenario_audit_output else "",
+        "review_queue": {
+            "selected": review_queue.selected,
+            "total_scenarios": review_queue.total_scenarios,
+            "stratum_counts": review_queue.stratum_counts,
+            "output": str(review_output) if review_output else "",
+        },
+        "validation": validation,
+        "valid": valid,
+        "scale_decision": {
+            "approved": bool(scale_decision.get("approved", False)),
+            "reason": str(scale_decision.get("reason", "")),
+        },
+        "approved_for_scale": valid and bool(scale_decision.get("approved", False)),
+    }
+    manifest["manifest_output"] = str(manifest_path)
+    _write_json(manifest_path, manifest)
+    return manifest
+
+
+def _import_record_sources(
+    registry: ScenarioRegistry,
+    sources: Iterable[dict[str, Any]],
+    *,
+    config_dir: Path,
+    default_format: str,
+    default_split: str,
+    default_train_eligible: bool | None,
+) -> list[RegistryImportSummary]:
+    summaries = []
+    for source in sources:
+        source_path = _required_source_path(config_dir, source)
+        source_format = _source_format(source, default_format)
+        train_eligible = _train_eligible(
+            source.get("train_eligible", default_train_eligible)
+        )
+        if source_format in PUBLIC_ISSUE_PR_FORMATS:
+            summaries.append(
+                import_public_issue_pr_records(
+                    registry,
+                    load_source_records(source_path),
+                    source_format=source_format,
+                    source_name=str(source.get("source_name", "")),
+                    split=str(source.get("split", default_split)),
+                    license_name=str(source.get("license", "")),
+                    permitted_use=str(source.get("permitted_use", "research")),
+                    limit=_optional_int(source.get("limit")),
+                    test_command_template=str(source.get("test_command_template", "")),
+                    task_family=str(source.get("task_family", "")),
+                    source_method=str(source.get("source_method", "")),
+                    train_eligible=train_eligible,
+                    contamination_tags=_string_list(source.get("contamination_tags")),
+                    coverage_tags=_string_list(source.get("coverage_tags")),
+                    train_license_allowlist=sorted(
+                        set(DEFAULT_TRAIN_LICENSE_ALLOWLIST)
+                        | set(_string_list(source.get("allow_train_licenses")))
+                    ),
+                    strict=bool(source.get("strict", False)),
+                )
+            )
+        else:
+            summaries.append(
+                import_swe_style_records(
+                    registry,
+                    load_source_records(source_path),
+                    source_format=source_format,
+                    source_name=str(source.get("source_name", "")),
+                    split=str(source.get("split", default_split)),
+                    license_name=str(source.get("license", "")),
+                    permitted_use=str(source.get("permitted_use", "research")),
+                    limit=_optional_int(source.get("limit")),
+                    test_command_template=str(source.get("test_command_template", "")),
+                    task_family=str(source.get("task_family", "")),
+                    source_method=str(source.get("source_method", "")),
+                    train_eligible=train_eligible,
+                    contamination_tags=_string_list(source.get("contamination_tags")),
+                    coverage_tags=_string_list(source.get("coverage_tags")),
+                    strict=bool(source.get("strict", False)),
+                )
+            )
+    return summaries
+
+
+def _generate_synthetic_sources(
+    registry: ScenarioRegistry,
+    sources: Iterable[dict[str, Any]],
+    *,
+    config_dir: Path,
+    default_split: str,
+    default_train_eligible: bool | None,
+) -> list[RepositorySyntheticSummary]:
+    summaries = []
+    for source in sources:
+        source_path = _required_source_path(config_dir, source)
+        summaries.append(
+            generate_repository_synthetic_scenarios(
+                registry,
+                load_repository_synthesis_specs(source_path),
+                source_name=str(source.get("source_name", "repository_synthetic")),
+                split=str(source.get("split", default_split)),
+                task_families=_string_list(source.get("task_families")),
+                train_eligible=_train_eligible(
+                    source.get("train_eligible", default_train_eligible)
+                ),
+                train_license_allowlist=sorted(
+                    set(DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST)
+                    | set(_string_list(source.get("allow_train_licenses")))
+                ),
+                limit=_optional_int(source.get("limit")),
+                strict=bool(source.get("strict", False)),
+            )
+        )
+    return summaries
+
+
+def _coverage_budget_report(
+    seed_audit: dict[str, Any],
+    budget_value: Any,
+    *,
+    quarantine_count: int,
+) -> dict[str, Any]:
+    budget = _dict(budget_value)
+    issues = []
+    _add_min_count_issues(
+        issues,
+        "task_family",
+        _dict(seed_audit.get("train_task_family_counts")),
+        _int_dict(budget.get("min_task_family_counts")),
+    )
+    _add_min_count_issues(
+        issues,
+        "language",
+        _dict(seed_audit.get("train_language_counts")),
+        _int_dict(budget.get("min_language_counts")),
+    )
+    _add_min_count_issues(
+        issues,
+        "source_method",
+        _dict(seed_audit.get("train_source_method_counts")),
+        _int_dict(budget.get("min_source_method_counts")),
+    )
+    _add_min_count_issues(
+        issues,
+        "verifier_type",
+        _dict(seed_audit.get("train_verifier_type_counts")),
+        _int_dict(budget.get("min_verifier_type_counts")),
+    )
+    max_quarantined = _optional_int(budget.get("max_quarantined_records"))
+    if max_quarantined is not None and quarantine_count > max_quarantined:
+        issues.append(
+            {
+                "code": "quarantine_budget_exceeded",
+                "message": (
+                    f"Quarantined record count {quarantine_count} exceeds "
+                    f"budget {max_quarantined}"
+                ),
+                "severity": "error",
+            }
+        )
+    return {
+        "valid": not any(issue["severity"] == "error" for issue in issues),
+        "issues": issues,
+        "configured": budget,
+    }
+
+
+def _add_min_count_issues(
+    issues: list[dict[str, str]],
+    field_name: str,
+    actual: dict[str, Any],
+    required: dict[str, int],
+) -> None:
+    normalized_actual = {_normalize_label(key): int(value) for key, value in actual.items()}
+    for key, minimum in sorted(required.items()):
+        actual_count = normalized_actual.get(_normalize_label(key), 0)
+        if actual_count < minimum:
+            issues.append(
+                {
+                    "code": f"min_{field_name}_count_not_met",
+                    "message": (
+                        f"{field_name} {key} count {actual_count} is below "
+                        f"required minimum {minimum}"
+                    ),
+                    "severity": "error",
+                }
+            )
+
+
+def _quarantine_summary(
+    import_summaries: Iterable[RegistryImportSummary],
+    synthetic_summaries: Iterable[RepositorySyntheticSummary],
+    holdout_summaries: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    records = 0
+    issues = []
+    for summary in import_summaries:
+        records += summary.skipped
+        issues.extend(summary.issues)
+    for summary in synthetic_summaries:
+        records += summary.skipped
+        issues.extend(summary.issues)
+    for summary in holdout_summaries:
+        records += int(summary.get("skipped", 0) or 0)
+        issues.extend(summary.get("issues", []))
+    return {"records": records, "issues": issues}
+
+
+def _train_verifier_type_counts(seeds: Iterable[Any]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for seed in seeds:
+        if seed.train_eligible:
+            counts.update(seed.verifier_types)
+    return dict(sorted(counts.items()))
+
+
+def _seed_policy(value: Any) -> SeedLibraryPolicy:
+    policy = _dict(value)
+    return SeedLibraryPolicy(
+        min_train_eligible=_int(policy.get("min_train_eligible"), default=0),
+        required_task_families=_string_list(policy.get("required_task_families")),
+        required_verifier_types=_string_list(policy.get("required_verifier_types")),
+        max_task_family_share=_float(policy.get("max_task_family_share"), default=1.0),
+        max_source_method_share=_float(policy.get("max_source_method_share"), default=1.0),
+        max_repository_share=_float(policy.get("max_repository_share"), default=1.0),
+        max_language_share=_float(policy.get("max_language_share"), default=1.0),
+    )
+
+
+def _source_snapshots(config: dict[str, Any], config_dir: Path) -> list[dict[str, str]]:
+    snapshots = []
+    section_defaults = {
+        "public_issue_sources": "public_issue_pr",
+        "swe_style_sources": "auto",
+        "repository_synthetic_sources": "repository_synthetic",
+        "holdout_sources": "auto",
+    }
+    for section, default_format in section_defaults.items():
+        for source in _dict_list(config.get(section)):
+            path = _required_source_path(config_dir, source)
+            snapshots.append(
+                {
+                    "section": section,
+                    "path": str(path),
+                    "sha256": _file_sha256(path),
+                    "source_name": str(source.get("source_name", "")),
+                    "format": _source_format(source, default_format),
+                }
+            )
+    return snapshots
+
+
+def _registry_validation_payload(validation: Any) -> dict[str, Any]:
+    return {
+        "valid": validation.valid,
+        "issues": [asdict(issue) for issue in validation.issues],
+    }
+
+
+def _prepare_registry_root(root: Path, *, overwrite: bool) -> None:
+    if not root.exists():
+        return
+    if overwrite:
+        _ensure_safe_generated_root(root)
+        shutil.rmtree(root)
+        return
+    if _registry_has_entries(root):
+        raise ValueError(
+            f"Registry root already contains entries; set overwrite_registries for {root}"
+        )
+
+
+def _ensure_safe_generated_root(root: Path) -> None:
+    resolved = root.resolve()
+    unsafe = {Path("/").resolve(), Path.home().resolve()}
+    if resolved in unsafe or len(resolved.parts) < 4:
+        raise ValueError(f"Refusing to overwrite unsafe registry root: {root}")
+
+
+def _registry_has_entries(root: Path) -> bool:
+    for name in ("seeds", "environments", "scenarios"):
+        if any((root / name).glob("*.json")):
+            return True
+    return False
+
+
+def _required_path(config_dir: Path, config: dict[str, Any], key: str) -> Path:
+    value = config.get(key)
+    if not value:
+        raise ValueError(f"Seed corpus config requires {key}")
+    return _resolve_path(config_dir, value)
+
+
+def _optional_path(config_dir: Path, value: Any) -> Path | None:
+    if not value:
+        return None
+    return _resolve_path(config_dir, value)
+
+
+def _required_source_path(config_dir: Path, source: dict[str, Any]) -> Path:
+    value = source.get("path") or source.get("source")
+    if not value:
+        raise ValueError("Seed corpus source requires a path")
+    return _resolve_path(config_dir, value)
+
+
+def _resolve_path(config_dir: Path, value: Any) -> Path:
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = config_dir / path
+    return path.resolve()
+
+
+def _source_format(source: dict[str, Any], default: str) -> str:
+    return str(source.get("format") or source.get("source_format") or default).replace("-", "_")
+
+
+def _train_eligible(value: Any) -> bool | None:
+    if value is None or value == "auto":
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "1"}:
+        return True
+    if normalized in {"false", "no", "0"}:
+        return False
+    raise ValueError(f"Invalid train_eligible value: {value}")
+
+
+def _write_optional_json(path: Path | None, value: dict[str, Any]) -> None:
+    if path is not None:
+        _write_json(path, value)
+
+
+def _write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Seed corpus config must contain a JSON object")
+    return payload
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError("Seed corpus source sections must be lists of objects")
+    return list(value)
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        raise ValueError("Expected a string or a list of strings")
+    return [str(item) for item in value]
+
+
+def _int_dict(value: Any) -> dict[str, int]:
+    return {str(key): int(item) for key, item in _dict(value).items()}
+
+
+def _int(value: Any, *, default: int) -> int:
+    if value is None:
+        return default
+    return int(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _float(value: Any, *, default: float) -> float:
+    if value is None:
+        return default
+    return float(value)
+
+
+def _normalize_label(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")

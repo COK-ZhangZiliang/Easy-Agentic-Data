@@ -1,0 +1,109 @@
+{
+  "schema_version": "easy_agentic_data.seed_corpus.v1",
+  "train_registry_root": "../runs/seed-corpus-demo/train-registry",
+  "holdout_registry_root": "../runs/seed-corpus-demo/holdout-registry",
+  "manifest_output": "../runs/seed-corpus-demo/manifest.json",
+  "seed_audit_output": "../runs/seed-corpus-demo/seed-audit.json",
+  "scenario_audit_output": "../runs/seed-corpus-demo/scenario-audit.json",
+  "review_queue_output": "../runs/seed-corpus-demo/seed-review.jsonl",
+  "overwrite_outputs": true,
+  "overwrite_registries": true,
+  "public_issue_sources": [
+    {
+      "path": "public-issue-pr-seeds.jsonl",
+      "format": "public-issue",
+      "source_name": "curated-public-issues",
+      "split": "train",
+      "train_eligible": "auto",
+      "allow_train_licenses": ["Apache-2.0"]
+    }
+  ],
+  "repository_synthetic_sources": [
+    {
+      "path": "repository-synthesis.json",
+      "source_name": "curated-repository-synthetic",
+      "split": "train",
+      "train_eligible": "auto",
+      "task_families": [
+        "feature_implementation",
+        "test_authoring",
+        "refactor",
+        "dependency_upgrade",
+        "migration",
+        "docs_examples",
+        "security_hardening",
+        "performance",
+        "ci_build",
+        "code_review",
+        "repo_understanding"
+      ]
+    }
+  ],
+  "holdout_sources": [
+    {
+      "path": "swe-style-seeds.jsonl",
+      "format": "swe-bench",
+      "source_name": "princeton-nlp/SWE-bench_Lite",
+      "split": "evaluation",
+      "license": "MIT",
+      "train_eligible": false,
+      "test_command_template": "python -m pytest {test}"
+    }
+  ],
+  "seed_policy": {
+    "min_train_eligible": 12,
+    "required_task_families": [
+      "bug_repair",
+      "feature_implementation",
+      "test_authoring",
+      "refactor",
+      "dependency_upgrade",
+      "migration",
+      "security_hardening",
+      "performance",
+      "docs_examples",
+      "ci_build",
+      "code_review",
+      "repo_understanding"
+    ],
+    "required_verifier_types": [
+      "hidden_command",
+      "doctest",
+      "adversarial_test",
+      "benchmark_command",
+      "retrieval_evidence"
+    ],
+    "max_task_family_share": 1.0,
+    "max_source_method_share": 1.0,
+    "max_repository_share": 1.0,
+    "max_language_share": 1.0
+  },
+  "coverage_budgets": {
+    "min_task_family_counts": {
+      "bug_repair": 1,
+      "feature_implementation": 1,
+      "test_authoring": 1,
+      "refactor": 1,
+      "dependency_upgrade": 1,
+      "migration": 1,
+      "security_hardening": 1,
+      "performance": 1,
+      "docs_examples": 1,
+      "ci_build": 1,
+      "code_review": 1,
+      "repo_understanding": 1
+    },
+    "min_language_counts": {
+      "python": 1
+    },
+    "max_quarantined_records": 0
+  },
+  "review": {
+    "sample_per_stratum": 1,
+    "required": true
+  },
+  "scale_decision": {
+    "approved": false,
+    "reason": "Demo corpus is ready for audit and pilot only; large-shard approval requires human review and pilot quality reports."
+  }
+}

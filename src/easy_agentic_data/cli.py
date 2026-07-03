@@ -77,6 +77,7 @@ from easy_agentic_data.seed_library import (
     SeedLibraryPolicy,
     audit_seed_library,
 )
+from easy_agentic_data.seed_corpus import build_seed_corpus
 from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
@@ -257,6 +258,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     review_queue_parser.add_argument("--sample-per-stratum", type=int, default=1)
     review_queue_parser.add_argument("--max-records", type=int)
     review_queue_parser.add_argument("--overwrite", action="store_true")
+    build_corpus_parser = registry_subparsers.add_parser("build-corpus")
+    build_corpus_parser.add_argument("--config", required=True)
+    build_corpus_parser.add_argument("--manifest-output", default="")
+    build_corpus_parser.add_argument(
+        "--overwrite-outputs",
+        action="store_true",
+        help="Overwrite append-only review queue outputs declared by the corpus config",
+    )
     inspect_parser = registry_subparsers.add_parser("inspect")
     inspect_parser.add_argument("--root", required=True)
     inspect_parser.add_argument("--scenario-id", required=True)
@@ -542,6 +551,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(replay_trace(trace).to_dict(), ensure_ascii=False, indent=2))
         return 0
     if args.command == "registry":
+        if args.registry_command == "build-corpus":
+            manifest = build_seed_corpus(
+                args.config,
+                manifest_output=args.manifest_output or None,
+                overwrite_outputs=args.overwrite_outputs,
+            )
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+            return 0 if manifest["valid"] else 2
         registry = ScenarioRegistry(args.root)
         if args.registry_command == "list":
             print(json.dumps(registry.list_scenarios(), indent=2))

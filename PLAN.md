@@ -75,6 +75,8 @@ The first production-capable release must:
   and source instances
 - [x] Stratified human-review queue generation by task family, difficulty, source method, and
   verifier type
+- [x] Seed-corpus build gate that imports configured train and holdout sources, runs registry,
+  seed, scenario, coverage, and review-queue checks, and freezes a manifest for pilot decisions
 - [x] Registry-backed smoke rollout coverage for every supported task family in
   `tests/test_seed_library_rollouts.py`
 
@@ -446,7 +448,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
      license metadata completeness.
    - Produce a checked-in policy example and a run-specific private data manifest that maps each
      source to its license, collection method, fixed revision rule, and permitted-use notes.
-   - Exit gate: no collection starts until the budget can be evaluated by `registry seed-audit`.
+   - Exit gate: no collection starts until the budget can be evaluated by `registry seed-audit` or
+     the `registry build-corpus` manifest gate.
 
 2. **Repository allowlist and record collection**
    - Build the first allowlist from permissively licensed public repositories with active issue/PR
