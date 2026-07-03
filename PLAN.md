@@ -446,6 +446,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   materializes local `file://` workspaces, and can run hidden verifier commands before rollout.
 - [x] Add a source-record split gate that routes mixed collection exports into issue/PR and CI
   shards before format-specific import rehearsals.
+- [x] Add per-task collection export outcomes and a retry-plan gate that maps failed, skipped, and
+  unselected source-collection tasks to explicit retry shards.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -489,6 +491,9 @@ Current checkpoint:
   importer.
 - `collection-export` supports task offsets, max-task shards, sleep throttling, resume without
   duplicate source-instance IDs, summary files, and partial-success mode for API rate limits.
+- New export summaries include per-task outcomes, and `registry collection-retry-plan` turns
+  failed, skipped, and unselected source-collection tasks into exact retry shards with task IDs,
+  repositories, source types, and `--task-offset N --max-tasks 1` arguments.
 - `registry collection-readiness` now combines the collection plan, export summary, and collection
   audit into a registry-import gate with accepted-record, quarantine, source-type, clean-export,
   and full-plan coverage thresholds.
@@ -546,6 +551,8 @@ Immediate next execution plan:
 1. **Authenticated source collection**
    - Run resumable `collection-export` shards with a GitHub token, fixed task offsets, conservative
      sleep throttling, and `--allow-partial` so rate-limited tasks remain visible in the summary.
+   - Run `collection-retry-plan` after every shard or combined summary so failed, skipped, and
+     not-yet-selected tasks are assigned to explicit single-task retry shards.
    - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
    - Exit gate: all 30 current plan tasks are processed without unresolved HTTP errors, or every
      remaining failure is assigned to a retry shard with the exact task ID and repository.
@@ -784,3 +791,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a CI registry importer for public workflow failure records. |
 | 2026-07-03 | Added an import-rehearsal materialization gate for sampled local workspaces. |
 | 2026-07-03 | Added a source-record split gate for issue/PR and CI import-rehearsal shards. |
+| 2026-07-03 | Added per-task source export outcomes and retry planning for incomplete collection shards. |

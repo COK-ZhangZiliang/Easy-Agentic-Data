@@ -442,6 +442,159 @@ class SourceCollectionTests(unittest.TestCase):
             self.assertEqual(summary["new_records"], 1)
             self.assertEqual(len(summary["issues"]), 1)
 
+    def test_cli_collection_export_records_task_outcomes_for_retry_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowlist = root / "allowlist.json"
+            plan_output = root / "plan.json"
+            export_output = root / "exports.jsonl"
+            _write_fixture_source(root / "fixtures", include_pull_requests=False)
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "registry",
+                        "collection-plan",
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(plan_output),
+                    ]
+                )
+            export_stdout = io.StringIO()
+            with redirect_stdout(export_stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-export",
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(export_output),
+                        "--fixture-root",
+                        str(root / "fixtures"),
+                        "--limit-per-task",
+                        "1",
+                        "--allow-partial",
+                    ]
+                )
+
+            summary = json.loads(export_stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(summary["task_offset"], 0)
+            self.assertIsNone(summary["max_tasks"])
+            self.assertEqual(
+                [item["status"] for item in summary["task_outcomes"]],
+                ["processed", "failed"],
+            )
+            self.assertEqual(summary["task_outcomes"][0]["new_records"], 1)
+            self.assertIn("collection-task_", summary["task_outcomes"][1]["issue"])
+
+    def test_cli_collection_retry_plan_assigns_explicit_retry_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            summary_output = root / "summary.json"
+            retry_output = root / "retry.json"
+            legacy_summary_output = root / "legacy-summary.json"
+            legacy_retry_output = root / "legacy-retry.json"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            failed_task = plan["tasks"][0]
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": True,
+                        "plan_tasks": 2,
+                        "task_offset": 0,
+                        "selected_tasks": 1,
+                        "processed_tasks": 1,
+                        "skipped_tasks": 0,
+                        "output_path": str(root / "records.jsonl"),
+                        "issues": [f"{failed_task['task_id']}: HTTP Error 403"],
+                        "task_outcomes": [
+                            {
+                                "task_id": failed_task["task_id"],
+                                "task_index": 0,
+                                "status": "failed",
+                                "issue": f"{failed_task['task_id']}: HTTP Error 403",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-retry-plan",
+                        "--plan",
+                        str(plan_output),
+                        "--export-summary",
+                        str(summary_output),
+                        "--output",
+                        str(retry_output),
+                    ]
+                )
+
+            retry_plan = json.loads(retry_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(retry_plan["ready_for_retry"])
+            self.assertEqual(retry_plan["reason_counts"], {"failed": 1, "not_selected": 1})
+            self.assertEqual(
+                [(item["task_index"], item["repository"]) for item in retry_plan["retry_tasks"]],
+                [(0, "example/tool"), (1, "example/tool")],
+            )
+            self.assertEqual(
+                retry_plan["retry_tasks"][0]["collection_export_args"],
+                ["--task-offset", "0", "--max-tasks", "1"],
+            )
+
+            legacy_summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": True,
+                        "plan_tasks": 2,
+                        "selected_tasks": 1,
+                        "processed_tasks": 0,
+                        "skipped_tasks": 1,
+                        "output_path": str(root / "records.jsonl"),
+                        "issues": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                legacy_exit_code = main(
+                    [
+                        "registry",
+                        "collection-retry-plan",
+                        "--plan",
+                        str(plan_output),
+                        "--export-summary",
+                        str(legacy_summary_output),
+                        "--output",
+                        str(legacy_retry_output),
+                    ]
+                )
+
+            legacy_retry_plan = json.loads(legacy_retry_output.read_text(encoding="utf-8"))
+            self.assertEqual(legacy_exit_code, 0)
+            self.assertEqual(
+                legacy_retry_plan["reason_counts"],
+                {"not_selected": 1, "skipped_or_unverified": 1},
+            )
+
     def test_cli_collection_split_routes_mixed_records_by_source_type(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

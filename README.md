@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-179%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-181%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -262,6 +262,11 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-export \
   --allow-partial \
   --sleep-seconds 2
 
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-retry-plan \
+  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
+  --export-summary runs/seed-corpus-demo/production-source-export-summary.json \
+  --output runs/seed-corpus-demo/production-source-retry-plan.json
+
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
   --source runs/seed-corpus-demo/production-public-source-records.jsonl \
   --allowlist examples/production-repository-allowlist.json \
@@ -325,19 +330,22 @@ unauthenticated GitHub API access for small probes, or a token read from an envi
 with `--github-token-env GITHUB_TOKEN` when rate limits require it. Use `--max-tasks`,
 `--task-offset`, `--resume`, and `--sleep-seconds` to shard and resume collection without
 duplicating source-instance IDs. `--allow-partial` is useful for rate-limited runs because valid
-records are still written and can be audited while failed tasks remain visible in the summary. CI
-collection tasks export `public_ci` records from failed workflow runs with fixed head SHAs and
-`ci_commands` verifier evidence. Import issue/PR and CI records through their matching formats:
-the public issue/PR importer still rejects CI records, while `--format public-ci` maps CI commands
-to hidden verifier commands for `ci_build` seeds. `collection-readiness` combines the collection
-plan, export summary, and audit output into the registry-import gate: small probes can lower
-`--min-accepted`, while production runs should require the policy target, issue, PR, and CI
-records, clean export summaries, and full plan-task coverage. `collection-split` then routes the
-mixed export into importer-specific shards so issue/PR and CI rehearsals cannot accidentally
-consume each other's record types. `import-rehearsal` imports each audited trainable source shard
-into a temporary registry, applies the allowlist, runs registry validation and seed-audit gates,
-and writes a pre-materialization summary. When source records point at local `file://` workspace
-caches, add `--materialize-sample-count N`,
+records are still written and can be audited while failed tasks remain visible in the summary.
+Each new export summary includes per-task outcomes. `collection-retry-plan` turns failed, skipped,
+or not-yet-selected collection tasks into explicit retry shards with task IDs, repositories,
+source types, and `--task-offset N --max-tasks 1` arguments. CI collection tasks export
+`public_ci` records from failed workflow runs with fixed head SHAs and `ci_commands` verifier
+evidence. Import issue/PR and CI records through their matching formats: the public issue/PR
+importer still rejects CI records, while `--format public-ci` maps CI commands to hidden verifier
+commands for `ci_build` seeds. `collection-readiness` combines the collection plan, export
+summary, and audit output into the registry-import gate: small probes can lower `--min-accepted`,
+while production runs should require the policy target, issue, PR, and CI records, clean export
+summaries, and full plan-task coverage. `collection-split` then routes the mixed export into
+importer-specific shards so issue/PR and CI rehearsals cannot accidentally consume each other's
+record types. `import-rehearsal` imports each audited trainable source shard into a temporary
+registry, applies the allowlist, runs registry validation and seed-audit gates, and writes a
+pre-materialization summary. When source records point at local `file://` workspace caches, add
+`--materialize-sample-count N`,
 `--materialize-root ...`, and optionally `--run-hidden-commands` to prove sampled scenarios can be
 materialized and their hidden verifier commands pass before model rollout. This gate intentionally
 fails for records that only have non-local source URIs, because those records are not yet tied to a

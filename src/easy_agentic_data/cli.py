@@ -87,6 +87,7 @@ from easy_agentic_data.seed_corpus import build_seed_corpus, rehearse_registry_i
 from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
+    build_source_collection_retry_plan,
     build_source_collection_plan,
     export_public_source_records,
     split_public_source_records,
@@ -366,6 +367,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_export_parser.add_argument("--fixture-root", default="")
     collection_export_parser.add_argument("--github-token-env", default="")
     collection_export_parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    collection_retry_parser = registry_subparsers.add_parser("collection-retry-plan")
+    collection_retry_parser.add_argument("--plan", required=True)
+    collection_retry_parser.add_argument("--export-summary", required=True)
+    collection_retry_parser.add_argument("--output", default="")
+    collection_retry_parser.add_argument(
+        "--selected-only",
+        action="store_true",
+        help="Only plan retries for tasks inside the export summary's selected shard",
+    )
     collection_split_parser = registry_subparsers.add_parser("collection-split")
     collection_split_parser.add_argument("--source", required=True)
     collection_split_parser.add_argument("--output", required=True)
@@ -736,6 +746,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if summary.valid else 2
+        if args.registry_command == "collection-retry-plan":
+            retry_plan = build_source_collection_retry_plan(
+                json.loads(Path(args.plan).read_text(encoding="utf-8")),
+                json.loads(Path(args.export_summary).read_text(encoding="utf-8")),
+                include_unselected=not args.selected_only,
+            )
+            payload = retry_plan.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if retry_plan.valid else 2
         if args.registry_command == "collection-split":
             summary = split_public_source_records(
                 load_source_records(args.source),

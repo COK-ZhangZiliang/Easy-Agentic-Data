@@ -76,6 +76,8 @@ class SourceExportSummary:
     """Summary of public source records exported from a collection plan."""
 
     plan_tasks: int = 0
+    task_offset: int = 0
+    max_tasks: int | None = None
     selected_tasks: int = 0
     processed_tasks: int = 0
     exported: int = 0
@@ -89,6 +91,7 @@ class SourceExportSummary:
     source_type_counts: dict[str, int] = field(default_factory=dict)
     repository_counts: dict[str, int] = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
+    task_outcomes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -166,6 +169,43 @@ class SourceRecordSplitSummary:
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["valid"] = self.valid
+        return value
+
+
+@dataclass
+class SourceCollectionRetryPlan:
+    """Retry plan for incomplete public source collection exports."""
+
+    plan_tasks: int = 0
+    selected_tasks: int = 0
+    processed_tasks: int = 0
+    skipped_tasks: int = 0
+    task_offset: int = 0
+    task_outcome_count: int = 0
+    include_unselected: bool = True
+    retry_task_count: int = 0
+    source_output_path: str = ""
+    reason_counts: dict[str, int] = field(default_factory=dict)
+    retry_tasks: list[dict[str, Any]] = field(default_factory=list)
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
+
+    @property
+    def complete(self) -> bool:
+        return self.valid and self.retry_task_count == 0
+
+    @property
+    def ready_for_retry(self) -> bool:
+        return self.valid and self.retry_task_count > 0
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        value["complete"] = self.complete
+        value["ready_for_retry"] = self.ready_for_retry
         return value
 
 
@@ -265,11 +305,18 @@ def export_public_source_records(
     skipped_tasks = 0
     skipped_records = 0
     processed_tasks = 0
+    task_outcomes: list[dict[str, Any]] = []
+    start_offset = max(0, task_offset)
 
     for task_index, task in enumerate(selected_tasks):
+        absolute_task_index = start_offset + task_index
         collection_source = _normalize_label(task.get("collection_source"))
+        task_outcome = _source_task_outcome(task, absolute_task_index)
         if collection_source not in {"issues", "pull_requests", "ci"}:
             skipped_tasks += 1
+            task_outcome["status"] = "skipped_unsupported"
+            task_outcome["issue"] = f"Unsupported collection source: {collection_source}"
+            task_outcomes.append(task_outcome)
             continue
         processed_tasks += 1
         try:
@@ -279,20 +326,33 @@ def export_public_source_records(
                 limit=max(0, limit_per_task),
             )
         except Exception as exc:
-            issues.append(f"{task.get('task_id', '<unknown>')}: {exc}")
+            issue = f"{task.get('task_id', '<unknown>')}: {exc}"
+            issues.append(issue)
+            task_outcome["status"] = "failed"
+            task_outcome["issue"] = issue
+            task_outcomes.append(task_outcome)
             _sleep_between_tasks(task_index, selected_tasks, sleep_seconds)
             continue
         skipped_records += skipped
+        task_new_records = 0
+        task_duplicate_records = 0
         for record in exported:
             instance_id = _source_instance_id(record)
             if instance_id in seen_instance_ids:
                 duplicate_records += 1
+                task_duplicate_records += 1
                 continue
             seen_instance_ids.add(instance_id)
             records.append(record)
             new_records += 1
+            task_new_records += 1
             source_type_counts[_source_type(record)] += 1
             repository_counts[_repository(record)] += 1
+        task_outcome["status"] = "processed"
+        task_outcome["new_records"] = task_new_records
+        task_outcome["duplicate_records"] = task_duplicate_records
+        task_outcome["skipped_records"] = skipped
+        task_outcomes.append(task_outcome)
         _sleep_between_tasks(task_index, selected_tasks, sleep_seconds)
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +361,8 @@ def export_public_source_records(
             handle.write(json.dumps(record, sort_keys=True) + "\n")
     return SourceExportSummary(
         plan_tasks=len(tasks),
+        task_offset=start_offset,
+        max_tasks=max_tasks if max_tasks is None else max(0, max_tasks),
         selected_tasks=len(selected_tasks),
         processed_tasks=processed_tasks,
         exported=len(records),
@@ -313,6 +375,129 @@ def export_public_source_records(
         output_path=str(output),
         source_type_counts=dict(sorted(source_type_counts.items())),
         repository_counts=dict(sorted(repository_counts.items())),
+        issues=issues,
+        task_outcomes=task_outcomes,
+    )
+
+
+def build_source_collection_retry_plan(
+    collection_plan: dict[str, Any],
+    export_summary: dict[str, Any],
+    *,
+    include_unselected: bool = True,
+) -> SourceCollectionRetryPlan:
+    """Assign incomplete collection tasks to explicit retry shards."""
+
+    tasks = list(collection_plan.get("tasks", []))
+    task_by_id = {_text(task.get("task_id")): index for index, task in enumerate(tasks)}
+    task_offset = _int_field(export_summary.get("task_offset"))
+    selected_tasks = _int_field(export_summary.get("selected_tasks"))
+    processed_tasks = _int_field(export_summary.get("processed_tasks"))
+    skipped_tasks = _int_field(export_summary.get("skipped_tasks"))
+    selected_indexes = set(range(task_offset, min(len(tasks), task_offset + selected_tasks)))
+    retry_tasks: list[dict[str, Any]] = []
+    assigned: set[int] = set()
+    issues: list[SourceCollectionIssue] = []
+    task_outcomes = export_summary.get("task_outcomes")
+
+    if isinstance(task_outcomes, list) and task_outcomes:
+        outcome_indexes: set[int] = set()
+        for raw_outcome in task_outcomes:
+            if not isinstance(raw_outcome, dict):
+                issues.append(
+                    SourceCollectionIssue(
+                        code="malformed_task_outcome",
+                        message="Task outcome entries must be objects",
+                    )
+                )
+                continue
+            task_index = _task_outcome_index(raw_outcome, task_by_id)
+            if task_index < 0 or task_index >= len(tasks):
+                issues.append(
+                    SourceCollectionIssue(
+                        code="unknown_task_outcome",
+                        message="Task outcome does not match a collection-plan task",
+                        source_instance_id=_text(raw_outcome.get("task_id")),
+                    )
+                )
+                continue
+            outcome_indexes.add(task_index)
+            status = _normalize_label(raw_outcome.get("status"))
+            if status in {"failed", "skipped_unsupported"}:
+                _append_retry_task(
+                    tasks,
+                    task_index,
+                    retry_tasks,
+                    assigned,
+                    reason=status,
+                    issue=_text(raw_outcome.get("issue")),
+                )
+        for task_index in sorted(selected_indexes - outcome_indexes):
+            _append_retry_task(
+                tasks,
+                task_index,
+                retry_tasks,
+                assigned,
+                reason="missing_task_outcome",
+                issue="Selected collection task has no recorded outcome",
+            )
+    else:
+        for issue in _string_list(export_summary.get("issues")):
+            task_id = issue.split(":", 1)[0].strip()
+            task_index = task_by_id.get(task_id, -1)
+            if task_index < 0:
+                issues.append(
+                    SourceCollectionIssue(
+                        code="unmatched_export_issue",
+                        message=f"Export issue does not match a collection-plan task: {issue}",
+                        source_instance_id=task_id,
+                    )
+                )
+                continue
+            _append_retry_task(
+                tasks,
+                task_index,
+                retry_tasks,
+                assigned,
+                reason="failed",
+                issue=issue,
+            )
+        if skipped_tasks:
+            for task_index in sorted(selected_indexes - assigned):
+                _append_retry_task(
+                    tasks,
+                    task_index,
+                    retry_tasks,
+                    assigned,
+                    reason="skipped_or_unverified",
+                    issue="Legacy export summary reported skipped tasks without per-task outcomes",
+                )
+
+    if include_unselected:
+        for task_index in range(len(tasks)):
+            if task_index not in selected_indexes:
+                _append_retry_task(
+                    tasks,
+                    task_index,
+                    retry_tasks,
+                    assigned,
+                    reason="not_selected",
+                    issue="Collection task was outside the export shard",
+                )
+
+    reason_counts: Counter[str] = Counter(_text(task.get("reason")) for task in retry_tasks)
+    return SourceCollectionRetryPlan(
+        plan_tasks=len(tasks),
+        selected_tasks=selected_tasks,
+        processed_tasks=processed_tasks,
+        skipped_tasks=skipped_tasks,
+        task_offset=task_offset,
+        task_outcome_count=len(task_outcomes) if isinstance(task_outcomes, list) else 0,
+        include_unselected=include_unselected,
+        retry_task_count=len(retry_tasks),
+        source_output_path=_text(export_summary.get("output_path")),
+        reason_counts=dict(sorted(reason_counts.items())),
+        retry_tasks=retry_tasks,
         issues=issues,
     )
 
@@ -571,6 +756,62 @@ def summarize_source_collection_readiness(
         audit_issue_count=len(audit_issues),
         issues=issues,
     )
+
+
+def _source_task_outcome(task: dict[str, Any], task_index: int) -> dict[str, Any]:
+    return {
+        "task_id": _text(task.get("task_id")),
+        "task_index": task_index,
+        "repository": _repository(task),
+        "collection_source": _normalize_label(task.get("collection_source")),
+        "status": "pending",
+        "new_records": 0,
+        "duplicate_records": 0,
+        "skipped_records": 0,
+        "issue": "",
+    }
+
+
+def _task_outcome_index(
+    outcome: dict[str, Any],
+    task_by_id: dict[str, int],
+) -> int:
+    task_index = _int_field(outcome.get("task_index"), default=-1)
+    if task_index >= 0:
+        return task_index
+    task_id = _text(outcome.get("task_id"))
+    return task_by_id.get(task_id, -1)
+
+
+def _append_retry_task(
+    tasks: list[dict[str, Any]],
+    task_index: int,
+    retry_tasks: list[dict[str, Any]],
+    assigned: set[int],
+    *,
+    reason: str,
+    issue: str = "",
+) -> None:
+    if task_index in assigned or task_index < 0 or task_index >= len(tasks):
+        return
+    task = tasks[task_index]
+    retry_tasks.append(
+        {
+            "task_id": _text(task.get("task_id")),
+            "task_index": task_index,
+            "repository": _repository(task),
+            "collection_source": _normalize_label(task.get("collection_source")),
+            "reason": reason,
+            "issue": issue,
+            "collection_export_args": [
+                "--task-offset",
+                str(task_index),
+                "--max-tasks",
+                "1",
+            ],
+        }
+    )
+    assigned.add(task_index)
 
 
 def _selected_tasks(
