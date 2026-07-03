@@ -546,6 +546,126 @@ class SourceCollectionTests(unittest.TestCase):
             if old_value is not None:
                 os.environ[env_name] = old_value
 
+    def test_cli_collection_preflight_blocks_missing_required_github_token(self) -> None:
+        env_name = "EAD_TEST_MISSING_GITHUB_TOKEN"
+        old_value = os.environ.pop(env_name, None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan_output = root / "plan.json"
+                source_output = root / "source.jsonl"
+                preflight_output = root / "preflight.json"
+                plan = build_source_collection_plan(
+                    [_allowlist_record()],
+                    output_root=root / "exports",
+                    source_name="curated-public-sources",
+                )
+                plan_output.write_text(json.dumps(plan), encoding="utf-8")
+
+                with redirect_stdout(io.StringIO()):
+                    exit_code = main(
+                        [
+                            "registry",
+                            "collection-preflight",
+                            "--plan",
+                            str(plan_output),
+                            "--source",
+                            str(source_output),
+                            "--github-token-env",
+                            env_name,
+                            "--require-github-token",
+                            "--task-offset",
+                            "0",
+                            "--max-tasks",
+                            "1",
+                            "--output",
+                            str(preflight_output),
+                        ]
+                    )
+
+                preflight = json.loads(preflight_output.read_text(encoding="utf-8"))
+                issue_codes = {issue["code"] for issue in preflight["issues"]}
+                self.assertEqual(exit_code, 2)
+                self.assertFalse(preflight["ready_for_collection"])
+                self.assertEqual(preflight["selected_tasks"], 1)
+                self.assertFalse(preflight["github_token_configured"])
+                self.assertFalse(source_output.exists())
+                self.assertIn("missing_github_token", issue_codes)
+        finally:
+            if old_value is not None:
+                os.environ[env_name] = old_value
+
+    def test_cli_collection_preflight_accepts_existing_artifacts(self) -> None:
+        env_name = "EAD_TEST_GITHUB_TOKEN"
+        old_value = os.environ.get(env_name)
+        os.environ[env_name] = "value-not-emitted"
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan_output = root / "plan.json"
+                source_output = root / "source.jsonl"
+                summary_output = root / "summary.json"
+                preflight_output = root / "preflight.json"
+                plan = build_source_collection_plan(
+                    [_allowlist_record()],
+                    output_root=root / "exports",
+                    source_name="curated-public-sources",
+                )
+                plan_output.write_text(json.dumps(plan), encoding="utf-8")
+                source_output.write_text(json.dumps(_source_record()) + "\n", encoding="utf-8")
+                summary_output.write_text(
+                    json.dumps(
+                        {
+                            "valid": True,
+                            "plan_tasks": 2,
+                            "selected_tasks": 1,
+                            "processed_tasks": 1,
+                            "exported": 1,
+                            "issues": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "registry",
+                            "collection-preflight",
+                            "--plan",
+                            str(plan_output),
+                            "--source",
+                            str(source_output),
+                            "--summary",
+                            str(summary_output),
+                            "--github-token-env",
+                            env_name,
+                            "--require-github-token",
+                            "--require-source",
+                            "--output",
+                            str(preflight_output),
+                        ]
+                    )
+
+                preflight = json.loads(preflight_output.read_text(encoding="utf-8"))
+                self.assertEqual(exit_code, 0)
+                self.assertTrue(preflight["ready_for_collection"])
+                self.assertTrue(preflight["github_token_configured"])
+                self.assertEqual(preflight["source_records"], 1)
+                self.assertEqual(preflight["existing_summaries"], 1)
+                self.assertEqual(preflight["issues"], [])
+                self.assertNotIn("value-not-emitted", stdout.getvalue())
+                self.assertNotIn(
+                    "value-not-emitted",
+                    preflight_output.read_text(encoding="utf-8"),
+                )
+        finally:
+            if old_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = old_value
+
     def test_cli_collection_retry_plan_assigns_explicit_retry_shards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

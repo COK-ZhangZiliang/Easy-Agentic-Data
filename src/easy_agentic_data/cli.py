@@ -93,6 +93,7 @@ from easy_agentic_data.source_collection import (
     merge_source_export_summaries,
     run_source_collection_retry_plan,
     split_public_source_records,
+    summarize_source_collection_preflight,
     summarize_source_collection_readiness,
 )
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
@@ -356,6 +357,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_plan_parser.add_argument("--output", default="")
     collection_plan_parser.add_argument("--output-root", default="runs/source-exports")
     collection_plan_parser.add_argument("--source-name", default="curated-public-sources")
+    collection_preflight_parser = registry_subparsers.add_parser("collection-preflight")
+    collection_preflight_parser.add_argument("--plan", required=True)
+    collection_preflight_parser.add_argument("--source", default="")
+    collection_preflight_parser.add_argument("--summary", action="append", default=[])
+    collection_preflight_parser.add_argument("--github-token-env", default="")
+    collection_preflight_parser.add_argument("--require-github-token", action="store_true")
+    collection_preflight_parser.add_argument("--task-offset", type=int, default=0)
+    collection_preflight_parser.add_argument("--max-tasks", type=int)
+    collection_preflight_parser.add_argument("--require-source", action="store_true")
+    collection_preflight_parser.add_argument("--output", default="")
     collection_export_parser = registry_subparsers.add_parser("collection-export")
     collection_export_parser.add_argument("--plan", required=True)
     collection_export_parser.add_argument("--output", required=True)
@@ -749,6 +760,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(plan, indent=2, sort_keys=True))
             return 0 if plan["valid"] else 2
+        if args.registry_command == "collection-preflight":
+            preflight = summarize_source_collection_preflight(
+                json.loads(Path(args.plan).read_text(encoding="utf-8")),
+                source_path=args.source,
+                summary_paths=args.summary,
+                github_token_env=args.github_token_env,
+                require_github_token=args.require_github_token,
+                task_offset=args.task_offset,
+                max_tasks=args.max_tasks,
+                require_source=args.require_source,
+            )
+            payload = preflight.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if preflight.ready_for_collection else 2
         if args.registry_command == "collection-export":
             plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
             summary = export_public_source_records(

@@ -455,6 +455,9 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add a collection-summary gate that rebuilds one readiness-compatible export summary from
   the final source JSONL plus all shard and retry-run summaries, avoiding record double-counting
   while preserving unresolved task failures.
+- [x] Add a collection-preflight gate that checks local plan validity, selected shard coverage,
+  required GitHub authentication, and optional source/summary artifacts before any networked
+  source export starts.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -508,6 +511,10 @@ Current checkpoint:
   the final source JSONL plus all collection-export and collection-retry-run summaries. The final
   JSONL is the record-count source of truth, while task outcomes from later retry summaries replace
   earlier failed shard outcomes so resolved rate-limit failures do not block a clean gate.
+- `registry collection-preflight` now checks the collection plan, selected shard, optional existing
+  source JSONL, optional summary files, and required GitHub authentication before networked source
+  export begins. It records only whether the named token environment variable is configured, never
+  the token value.
 - Production `collection-export` runs can now use `--require-github-token` with
   `--github-token-env GITHUB_TOKEN` to fail locally when authenticated collection is not
   configured, instead of silently falling back to anonymous GitHub API limits.
@@ -535,9 +542,10 @@ Current checkpoint:
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
   with 7 accepted PR records, no accepted issue or CI records, and no production import approval.
 - The current authenticated collection preflight refreshed the production allowlist audit and
-  30-task collection plan, then stopped locally because `GITHUB_TOKEN` is not set. The generated
-  retry plan now keeps every task visible: four selected tasks are marked `missing_task_outcome`
-  and the remaining 26 tasks are marked `not_selected`.
+  30-task collection plan, then stopped locally because `GITHUB_TOKEN` is not set. The preflight
+  report now exposes that blocker before export, and the generated retry plan keeps every task
+  visible: four selected tasks are marked `missing_task_outcome` and the remaining 26 tasks are
+  marked `not_selected`.
 - The next data gate is to run authenticated production source-collection shards with
   `collection-export`, resolve retries with `collection-retry-plan` and `collection-retry-run`,
   merge the final shard state with `collection-summary`, then run `collection-audit`,
@@ -572,6 +580,9 @@ Operational sequencing:
 Immediate next execution plan:
 
 1. **Authenticated source collection**
+   - Run `collection-preflight` before each production shard so missing authentication, empty task
+     selections, invalid plans, malformed source JSONL, or missing resume summaries fail before
+     any networked GitHub request starts.
    - Run resumable `collection-export` shards with a GitHub token, fixed task offsets, conservative
      sleep throttling, and `--allow-partial` so rate-limited tasks remain visible in the summary.
    - Use `--require-github-token --github-token-env GITHUB_TOKEN` for production shards so missing
@@ -827,3 +838,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a collection retry runner that executes retry-plan tasks as resumable single-task shards. |
 | 2026-07-03 | Added a collection summary merge gate and updated the production source-collection plan to use merged summaries before readiness. |
 | 2026-07-03 | Fixed retry planning for auth-gated source collection shards with selected tasks but no task outcomes. |
+| 2026-07-03 | Added a source collection preflight gate for plan, shard, token, source, and summary checks before networked exports. |

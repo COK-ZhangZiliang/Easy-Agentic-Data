@@ -72,6 +72,42 @@ class SourceCollectionAudit:
 
 
 @dataclass
+class SourceCollectionPreflight:
+    """Local source-collection readiness check before networked export or retry shards."""
+
+    plan_tasks: int = 0
+    task_offset: int = 0
+    max_tasks: int | None = None
+    selected_tasks: int = 0
+    supported_selected_tasks: int = 0
+    source_path: str = ""
+    source_exists: bool = False
+    source_records: int = 0
+    require_source: bool = False
+    summary_paths: list[str] = field(default_factory=list)
+    existing_summaries: int = 0
+    missing_summaries: list[str] = field(default_factory=list)
+    require_github_token: bool = False
+    github_token_env: str = ""
+    github_token_configured: bool = False
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
+
+    @property
+    def ready_for_collection(self) -> bool:
+        return self.valid
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        value["ready_for_collection"] = self.ready_for_collection
+        return value
+
+
+@dataclass
 class SourceExportSummary:
     """Summary of public source records exported from a collection plan."""
 
@@ -309,6 +345,165 @@ def build_source_collection_plan(
         "total_tasks": len(tasks),
         "valid": allowlist_audit.valid and bool(tasks),
     }
+
+
+def summarize_source_collection_preflight(
+    collection_plan: dict[str, Any],
+    *,
+    source_path: str | Path = "",
+    summary_paths: Iterable[str | Path] = (),
+    github_token_env: str = "",
+    require_github_token: bool = False,
+    task_offset: int = 0,
+    max_tasks: int | None = None,
+    require_source: bool = False,
+) -> SourceCollectionPreflight:
+    """Check local prerequisites before starting source collection shards."""
+
+    if not isinstance(collection_plan, dict):
+        return SourceCollectionPreflight(
+            issues=[
+                SourceCollectionIssue(
+                    code="source_collection_plan_invalid",
+                    message="Collection plan must contain a JSON object",
+                )
+            ]
+        )
+
+    tasks = list(collection_plan.get("tasks", []))
+    plan_tasks = _int_field(collection_plan.get("total_tasks"), default=len(tasks))
+    if not plan_tasks:
+        plan_tasks = len(tasks)
+    start_offset = max(0, task_offset)
+    selected_tasks = _selected_tasks(tasks, task_offset=start_offset, max_tasks=max_tasks)
+    issues: list[SourceCollectionIssue] = []
+    supported_sources = {"issues", "pull_requests", "ci"}
+    supported_selected_tasks = 0
+
+    if not collection_plan.get("valid"):
+        issues.append(
+            SourceCollectionIssue(
+                code="source_collection_plan_invalid",
+                message="Collection plan is not valid",
+            )
+        )
+    if plan_tasks <= 0:
+        issues.append(
+            SourceCollectionIssue(
+                code="missing_collection_plan_tasks",
+                message="Collection plan does not contain any tasks",
+            )
+        )
+    if not selected_tasks:
+        issues.append(
+            SourceCollectionIssue(
+                code="no_selected_collection_tasks",
+                message="Task offset and max tasks do not select any collection tasks",
+            )
+        )
+    for task_index, task in enumerate(selected_tasks, start=start_offset):
+        collection_source = _normalize_label(task.get("collection_source"))
+        if collection_source in supported_sources:
+            supported_selected_tasks += 1
+        else:
+            issues.append(
+                SourceCollectionIssue(
+                    code="unsupported_collection_task",
+                    message=f"Selected task has unsupported collection source: {collection_source}",
+                    record_index=task_index,
+                    repository=_repository(task),
+                )
+            )
+
+    github_token_configured = bool(
+        github_token_env and os.environ.get(github_token_env, "").strip()
+    )
+    if require_github_token:
+        token_issue = _github_token_issue(github_token_env)
+        if token_issue:
+            issues.append(
+                SourceCollectionIssue(
+                    code=token_issue.split(":", 1)[0],
+                    message=token_issue,
+                )
+            )
+
+    source_text = str(source_path) if source_path else ""
+    source_exists = False
+    source_records = 0
+    if source_text:
+        source = Path(source_text)
+        source_exists = source.exists()
+        if source_exists:
+            try:
+                source_records = len(_existing_export_records(source))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                issues.append(
+                    SourceCollectionIssue(
+                        code="source_records_invalid",
+                        message=f"Source records are not readable JSONL: {exc}",
+                    )
+                )
+        elif require_source:
+            issues.append(
+                SourceCollectionIssue(
+                    code="missing_source_records",
+                    message=f"Required source records file does not exist: {source}",
+                )
+            )
+
+    normalized_summary_paths = [str(path) for path in summary_paths]
+    existing_summaries = 0
+    missing_summaries: list[str] = []
+    for summary_text in normalized_summary_paths:
+        summary = Path(summary_text)
+        if not summary.exists():
+            missing_summaries.append(summary_text)
+            issues.append(
+                SourceCollectionIssue(
+                    code="missing_collection_summary",
+                    message=f"Collection summary file does not exist: {summary}",
+                )
+            )
+            continue
+        try:
+            payload = json.loads(summary.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            issues.append(
+                SourceCollectionIssue(
+                    code="collection_summary_invalid",
+                    message=f"Collection summary is not readable JSON: {exc}",
+                )
+            )
+            continue
+        if not isinstance(payload, dict):
+            issues.append(
+                SourceCollectionIssue(
+                    code="collection_summary_invalid",
+                    message=f"Collection summary must contain a JSON object: {summary}",
+                )
+            )
+            continue
+        existing_summaries += 1
+
+    return SourceCollectionPreflight(
+        plan_tasks=plan_tasks,
+        task_offset=start_offset,
+        max_tasks=max_tasks if max_tasks is None else max(0, max_tasks),
+        selected_tasks=len(selected_tasks),
+        supported_selected_tasks=supported_selected_tasks,
+        source_path=source_text,
+        source_exists=source_exists,
+        source_records=source_records,
+        require_source=require_source,
+        summary_paths=normalized_summary_paths,
+        existing_summaries=existing_summaries,
+        missing_summaries=missing_summaries,
+        require_github_token=require_github_token,
+        github_token_env=github_token_env,
+        github_token_configured=github_token_configured,
+        issues=issues,
+    )
 
 
 def export_public_source_records(
