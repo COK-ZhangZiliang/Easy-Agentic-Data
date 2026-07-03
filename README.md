@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-158%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-160%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -223,6 +223,29 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry review-queue \
 For a production-corpus gate, prefer a single seed-corpus config that imports train and holdout
 sources, runs seed and scenario audits, writes the human-review queue, and freezes a manifest for
 pilot or shard selection:
+
+The checked-in production starting point is
+`examples/production-seed-corpus-policy.json` plus
+`examples/production-repository-allowlist.json`. These files define the first 1,000-seed target,
+coverage gates, review and pilot phases, and five verified public Python repository candidates.
+They are intentionally not a scale approval: the policy keeps `scale_decision.approved=false`
+until real source exports, registry materialization, decontamination audits, human review, and a
+pilot rollout pass. The demo commands below use toy sources that run locally; for the production
+candidate allowlist, start with:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \
+  --source examples/production-repository-allowlist.json \
+  --output runs/seed-corpus-demo/production-repository-allowlist-audit.json
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-plan \
+  --allowlist examples/production-repository-allowlist.json \
+  --output runs/seed-corpus-demo/production-source-collection-plan.json
+```
+
+Then collect real public records into local JSONL exports and run collection audit before registry
+import. Until those exported records exist, use the toy demo below to validate the end-to-end local
+gate mechanics:
 
 ```bash
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \

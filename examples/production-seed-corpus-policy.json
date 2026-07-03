@@ -1,0 +1,116 @@
+{
+  "schema_version": "easy_agentic_data.seed_corpus_policy.v1",
+  "policy_name": "first-production-python-code-agent-corpus",
+  "target_train_eligible": 1000,
+  "seed_policy": {
+    "min_train_eligible": 1000,
+    "required_task_families": [
+      "bug_repair",
+      "feature_implementation",
+      "test_authoring",
+      "refactor",
+      "dependency_upgrade",
+      "migration",
+      "security_hardening",
+      "performance",
+      "docs_examples",
+      "ci_build",
+      "code_review",
+      "repo_understanding"
+    ],
+    "required_verifier_types": [
+      "hidden_command",
+      "hidden_test_patch",
+      "build_command",
+      "doctest",
+      "adversarial_test",
+      "benchmark_command",
+      "retrieval_evidence"
+    ],
+    "max_task_family_share": 0.25,
+    "max_source_method_share": 0.65,
+    "max_repository_share": 0.10,
+    "max_language_share": 0.80
+  },
+  "coverage_budgets": {
+    "min_task_family_counts": {
+      "bug_repair": 100,
+      "feature_implementation": 75,
+      "test_authoring": 75,
+      "refactor": 60,
+      "dependency_upgrade": 50,
+      "migration": 50,
+      "security_hardening": 40,
+      "performance": 40,
+      "docs_examples": 75,
+      "ci_build": 75,
+      "code_review": 75,
+      "repo_understanding": 50
+    },
+    "min_language_counts": {
+      "python": 700
+    },
+    "min_source_method_counts": {
+      "public_issue_workspace": 300,
+      "public_pr_workspace": 150,
+      "repository_grounded_synthetic": 200
+    },
+    "min_verifier_type_counts": {
+      "hidden_command": 500,
+      "hidden_test_patch": 100,
+      "build_command": 100,
+      "doctest": 50,
+      "adversarial_test": 30,
+      "benchmark_command": 30,
+      "retrieval_evidence": 50
+    },
+    "max_quarantined_records": 200
+  },
+  "current_candidate_status": {
+    "repository_candidates": 5,
+    "minimum_repositories_required_by_share_cap": 10,
+    "approved_for_scale": false,
+    "remaining_requirements": [
+      "Expand the repository allowlist beyond the 10% maximum repository-share gate.",
+      "Collect and audit public issue, PR, CI, review, and release-migration records from fixed commits.",
+      "Generate repository-grounded synthetic backfill only for under-covered families and verifier types.",
+      "Materialize train and holdout registries, then run seed and scenario decontamination audits.",
+      "Approve a stratified human-review sample and a small DeepSeek V4 Pro pilot before larger shards."
+    ]
+  },
+  "rollout_plan": [
+    {
+      "phase": "source_policy",
+      "exit_gate": "The checked-in corpus policy and repository allowlist pass static tests and allowlist audits."
+    },
+    {
+      "phase": "source_collection",
+      "exit_gate": "All exported public records pass collection audit, allowlist filtering, fixed-revision checks, and quarantine budgets."
+    },
+    {
+      "phase": "registry_materialization",
+      "exit_gate": "Train and holdout registries pass validation, seed coverage gates, reset health checks, and scenario decontamination."
+    },
+    {
+      "phase": "human_review",
+      "exit_gate": "A stratified review queue is approved or every actionable issue is quarantined."
+    },
+    {
+      "phase": "pilot_rollout",
+      "exit_gate": "A small registry-backed DeepSeek V4 Pro pilot passes trace-quality, cost, reward, and verifier-success thresholds."
+    },
+    {
+      "phase": "scale_decision",
+      "exit_gate": "A frozen manifest records source snapshots, audit outputs, review decisions, pilot results, and explicit scale approval."
+    }
+  ],
+  "review": {
+    "sample_per_stratum": 2,
+    "max_records": 200,
+    "required": true
+  },
+  "scale_decision": {
+    "approved": false,
+    "reason": "Production scale-up requires real source export audits, seed-corpus manifest validity, human review approval, and a passing pilot quality report."
+  }
+}
