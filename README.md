@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-177%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-179%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -280,9 +280,22 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
   --require-all-plan-tasks \
   --output runs/seed-corpus-demo/production-source-readiness.json
 
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-split \
+  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
+  --output runs/seed-corpus-demo/production-public-issue-pr-source-records.jsonl \
+  --summary-output runs/seed-corpus-demo/production-public-issue-pr-source-summary.json \
+  --include-source-type public_issue \
+  --include-source-type public_pr
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-split \
+  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
+  --output runs/seed-corpus-demo/production-public-ci-source-records.jsonl \
+  --summary-output runs/seed-corpus-demo/production-public-ci-source-summary.json \
+  --include-source-type public_ci
+
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
   --root runs/seed-corpus-demo/production-import-rehearsal \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
+  --source runs/seed-corpus-demo/production-public-issue-pr-source-records.jsonl \
   --format public-issue-pr \
   --source-name production-public-python-sources \
   --allowlist examples/production-repository-allowlist.json \
@@ -319,10 +332,12 @@ the public issue/PR importer still rejects CI records, while `--format public-ci
 to hidden verifier commands for `ci_build` seeds. `collection-readiness` combines the collection
 plan, export summary, and audit output into the registry-import gate: small probes can lower
 `--min-accepted`, while production runs should require the policy target, issue, PR, and CI
-records, clean export summaries, and full plan-task coverage. `import-rehearsal` then imports each
-audited trainable source shard into a temporary registry, applies the allowlist, runs registry
-validation and seed-audit gates, and writes a pre-materialization summary. When source records
-point at local `file://` workspace caches, add `--materialize-sample-count N`,
+records, clean export summaries, and full plan-task coverage. `collection-split` then routes the
+mixed export into importer-specific shards so issue/PR and CI rehearsals cannot accidentally
+consume each other's record types. `import-rehearsal` imports each audited trainable source shard
+into a temporary registry, applies the allowlist, runs registry validation and seed-audit gates,
+and writes a pre-materialization summary. When source records point at local `file://` workspace
+caches, add `--materialize-sample-count N`,
 `--materialize-root ...`, and optionally `--run-hidden-commands` to prove sampled scenarios can be
 materialized and their hidden verifier commands pass before model rollout. This gate intentionally
 fails for records that only have non-local source URIs, because those records are not yet tied to a

@@ -444,6 +444,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   issue/PR importer.
 - [x] Add an optional import-rehearsal materialization gate that samples imported scenarios,
   materializes local `file://` workspaces, and can run hidden verifier commands before rollout.
+- [x] Add a source-record split gate that routes mixed collection exports into issue/PR and CI
+  shards before format-specific import rehearsals.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -483,13 +485,15 @@ Current checkpoint:
   have not yet been collected, and `scale_decision.approved` remains false.
 - `registry collection-export` now turns issue, pull-request, and CI collection-plan tasks into
   normalized public source JSONL. Issue and PR records are trainable-source candidates for the
-  public issue/PR importer; CI records are auditable source records until a CI-specific importer
-  lands.
+  public issue/PR importer, while CI records are trainable-source candidates for the public CI
+  importer.
 - `collection-export` supports task offsets, max-task shards, sleep throttling, resume without
   duplicate source-instance IDs, summary files, and partial-success mode for API rate limits.
 - `registry collection-readiness` now combines the collection plan, export summary, and collection
   audit into a registry-import gate with accepted-record, quarantine, source-type, clean-export,
   and full-plan coverage thresholds.
+- `registry collection-split` can split mixed collection exports by normalized source type so the
+  public issue/PR and public CI import rehearsals consume only compatible records.
 - A small registry import rehearsal with the currently collected PR records passes registry
   validation and seed-audit family/verifier consistency after filtering noisy PR checklist terms
   out of task-family inference.
@@ -555,15 +559,16 @@ Immediate next execution plan:
      import or paid DeepSeek V4 Pro synthesis.
 
 3. **Trainable issue/PR import rehearsal**
-   - Filter or shard issue/PR source records away from `public_ci` records before using the
-     current public issue/PR importer.
+   - Use `collection-split` to route `public_issue` and `public_pr` source records away from
+     `public_ci` records before invoking the public issue/PR importer.
    - Run `import-rehearsal` into a temporary registry with allowlist enforcement, registry
      validation, seed-audit gates, and explicit quarantine accounting.
    - Exit gate: imported issue/PR seeds have stable task IDs, fixed revisions, compatible licenses,
      source-instance IDs, task families, verifier types, train eligibility, and coverage tags.
 
 4. **CI source import and materialization validation**
-   - Run `public_ci` import rehearsals separately from issue/PR shards so failed workflow runs are
+   - Use `collection-split` to route `public_ci` source records into a dedicated CI shard, then run
+     `public_ci` import rehearsals separately from issue/PR shards so failed workflow runs are
      routed through the CI importer instead of the public issue/PR importer.
    - Use the import-rehearsal materialization gate on sampled CI scenarios from fixed source
      revisions and confirm their `ci_commands` run as hidden verifier commands in the target
@@ -778,3 +783,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a CI source collection record contract while keeping CI records out of the issue/PR importer. |
 | 2026-07-03 | Added a CI registry importer for public workflow failure records. |
 | 2026-07-03 | Added an import-rehearsal materialization gate for sampled local workspaces. |
+| 2026-07-03 | Added a source-record split gate for issue/PR and CI import-rehearsal shards. |

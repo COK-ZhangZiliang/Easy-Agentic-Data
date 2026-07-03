@@ -33,6 +33,7 @@ PUBLIC_SOURCE_REQUIRED_FIELDS = (
     "language",
     "candidate_verifier",
 )
+PUBLIC_SOURCE_TYPES = ("public_issue", "public_pr", "public_ci")
 
 
 @dataclass
@@ -139,6 +140,32 @@ class SourceCollectionReadiness:
         value = asdict(self)
         value["valid"] = self.valid
         value["ready_for_import"] = self.ready_for_import
+        return value
+
+
+@dataclass
+class SourceRecordSplitSummary:
+    """Summary for splitting mixed public source records into importer-specific shards."""
+
+    input_records: int = 0
+    selected_records: int = 0
+    skipped_records: int = 0
+    output_path: str = ""
+    included_source_types: list[str] = field(default_factory=list)
+    excluded_source_types: list[str] = field(default_factory=list)
+    source_type_counts: dict[str, int] = field(default_factory=dict)
+    repository_counts: dict[str, int] = field(default_factory=dict)
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return self.selected_records > 0 and not any(
+            issue.severity == "error" for issue in self.issues
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
         return value
 
 
@@ -284,6 +311,72 @@ def export_public_source_records(
         skipped_records=skipped_records,
         allow_partial=allow_partial,
         output_path=str(output),
+        source_type_counts=dict(sorted(source_type_counts.items())),
+        repository_counts=dict(sorted(repository_counts.items())),
+        issues=issues,
+    )
+
+
+def split_public_source_records(
+    records: Iterable[dict[str, Any]],
+    *,
+    output_path: str | Path,
+    include_source_types: Iterable[str] = (),
+    exclude_source_types: Iterable[str] = (),
+) -> SourceRecordSplitSummary:
+    """Write a filtered JSONL shard from mixed public source records."""
+
+    record_list = list(records)
+    output = Path(output_path)
+    issues: list[SourceCollectionIssue] = []
+    included = _source_type_filter(include_source_types, issues)
+    excluded = _source_type_filter(exclude_source_types, issues)
+    overlap = sorted(included & excluded)
+    if overlap:
+        issues.append(
+            SourceCollectionIssue(
+                code="source_type_filter_overlap",
+                message=(
+                    "Source type filters cannot include and exclude the same values: "
+                    f"{', '.join(overlap)}"
+                ),
+            )
+        )
+
+    selected: list[dict[str, Any]] = []
+    source_type_counts: Counter[str] = Counter()
+    repository_counts: Counter[str] = Counter()
+    if not any(issue.severity == "error" for issue in issues):
+        for record in record_list:
+            source_type = _source_type(record)
+            if included and source_type not in included:
+                continue
+            if source_type in excluded:
+                continue
+            selected.append(record)
+            source_type_counts[source_type] += 1
+            repository_counts[_repository(record)] += 1
+
+    if not selected and not any(issue.severity == "error" for issue in issues):
+        issues.append(
+            SourceCollectionIssue(
+                code="no_source_records_selected",
+                message="Source type filters did not select any records",
+            )
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as handle:
+        for record in selected:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+    return SourceRecordSplitSummary(
+        input_records=len(record_list),
+        selected_records=len(selected),
+        skipped_records=len(record_list) - len(selected),
+        output_path=str(output),
+        included_source_types=sorted(included),
+        excluded_source_types=sorted(excluded),
         source_type_counts=dict(sorted(source_type_counts.items())),
         repository_counts=dict(sorted(repository_counts.items())),
         issues=issues,
@@ -1124,6 +1217,27 @@ def _readiness_source_type(value: Any) -> str:
     if normalized in {"ci", "ci_failure", "workflow_run", "workflow_runs", "public_ci"}:
         return "public_ci"
     return normalized
+
+
+def _source_type_filter(
+    values: Iterable[str],
+    issues: list[SourceCollectionIssue],
+) -> set[str]:
+    selected: set[str] = set()
+    for value in values:
+        source_type = _readiness_source_type(value)
+        if not source_type:
+            continue
+        if source_type not in PUBLIC_SOURCE_TYPES:
+            issues.append(
+                SourceCollectionIssue(
+                    code="unknown_source_type_filter",
+                    message=f"Unsupported source type filter: {value}",
+                )
+            )
+            continue
+        selected.add(source_type)
+    return selected
 
 
 def _source_type_counts(value: Any) -> dict[str, int]:

@@ -89,6 +89,7 @@ from easy_agentic_data.source_collection import (
     audit_public_source_records,
     build_source_collection_plan,
     export_public_source_records,
+    split_public_source_records,
     summarize_source_collection_readiness,
 )
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
@@ -365,6 +366,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_export_parser.add_argument("--fixture-root", default="")
     collection_export_parser.add_argument("--github-token-env", default="")
     collection_export_parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    collection_split_parser = registry_subparsers.add_parser("collection-split")
+    collection_split_parser.add_argument("--source", required=True)
+    collection_split_parser.add_argument("--output", required=True)
+    collection_split_parser.add_argument("--summary-output", default="")
+    collection_split_parser.add_argument("--include-source-type", action="append", default=[])
+    collection_split_parser.add_argument("--exclude-source-type", action="append", default=[])
     collection_audit_parser = registry_subparsers.add_parser("collection-audit")
     collection_audit_parser.add_argument("--source", required=True)
     collection_audit_parser.add_argument("--allowlist", required=True)
@@ -719,6 +726,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixture_root=args.fixture_root or None,
                 github_token_env=args.github_token_env,
                 timeout_seconds=args.timeout_seconds,
+            )
+            payload = summary.to_dict()
+            if args.summary_output:
+                Path(args.summary_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.summary_output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if summary.valid else 2
+        if args.registry_command == "collection-split":
+            summary = split_public_source_records(
+                load_source_records(args.source),
+                output_path=args.output,
+                include_source_types=args.include_source_type,
+                exclude_source_types=args.exclude_source_type,
             )
             payload = summary.to_dict()
             if args.summary_output:

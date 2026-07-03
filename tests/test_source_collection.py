@@ -442,6 +442,110 @@ class SourceCollectionTests(unittest.TestCase):
             self.assertEqual(summary["new_records"], 1)
             self.assertEqual(len(summary["issues"]), 1)
 
+    def test_cli_collection_split_routes_mixed_records_by_source_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mixed.jsonl"
+            issue_pr_output = root / "issue-pr.jsonl"
+            issue_pr_summary_output = root / "issue-pr-summary.json"
+            ci_output = root / "ci.jsonl"
+            ci_summary_output = root / "ci-summary.json"
+            source.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in (_source_record(), _pr_source_record(), _ci_source_record())
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                issue_pr_exit_code = main(
+                    [
+                        "registry",
+                        "collection-split",
+                        "--source",
+                        str(source),
+                        "--output",
+                        str(issue_pr_output),
+                        "--summary-output",
+                        str(issue_pr_summary_output),
+                        "--include-source-type",
+                        "public_issue",
+                        "--include-source-type",
+                        "public_pr",
+                    ]
+                )
+            with redirect_stdout(io.StringIO()):
+                ci_exit_code = main(
+                    [
+                        "registry",
+                        "collection-split",
+                        "--source",
+                        str(source),
+                        "--output",
+                        str(ci_output),
+                        "--summary-output",
+                        str(ci_summary_output),
+                        "--include-source-type",
+                        "public-ci",
+                    ]
+                )
+
+            issue_pr_records = [
+                json.loads(line)
+                for line in issue_pr_output.read_text(encoding="utf-8").splitlines()
+            ]
+            ci_records = [
+                json.loads(line) for line in ci_output.read_text(encoding="utf-8").splitlines()
+            ]
+            issue_pr_summary = json.loads(issue_pr_summary_output.read_text(encoding="utf-8"))
+            ci_summary = json.loads(ci_summary_output.read_text(encoding="utf-8"))
+            self.assertEqual(issue_pr_exit_code, 0)
+            self.assertEqual(ci_exit_code, 0)
+            self.assertEqual(
+                [record["type"] for record in issue_pr_records],
+                ["issue", "pull_request"],
+            )
+            self.assertEqual([record["type"] for record in ci_records], ["ci_failure"])
+            self.assertEqual(issue_pr_summary["selected_records"], 2)
+            self.assertEqual(issue_pr_summary["skipped_records"], 1)
+            self.assertEqual(
+                issue_pr_summary["source_type_counts"],
+                {"public_issue": 1, "public_pr": 1},
+            )
+            self.assertEqual(ci_summary["included_source_types"], ["public_ci"])
+            self.assertEqual(ci_summary["source_type_counts"], {"public_ci": 1})
+
+    def test_cli_collection_split_blocks_empty_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "issue-only.jsonl"
+            output = root / "ci.jsonl"
+            source.write_text(json.dumps(_source_record()) + "\n", encoding="utf-8")
+
+            split_stdout = io.StringIO()
+            with redirect_stdout(split_stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-split",
+                        "--source",
+                        str(source),
+                        "--output",
+                        str(output),
+                        "--include-source-type",
+                        "public_ci",
+                    ]
+                )
+
+            summary = json.loads(split_stdout.getvalue())
+            codes = {issue["code"] for issue in summary["issues"]}
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(summary["valid"])
+            self.assertEqual(summary["selected_records"], 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), "")
+            self.assertIn("no_source_records_selected", codes)
+
     def test_cli_collection_readiness_accepts_complete_source_collection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -718,6 +822,25 @@ def _pr_source_record() -> dict[str, object]:
         "title": "Add parser regression coverage",
         "body": "This PR adds tests for quoted whitespace.",
         "labels": ["review"],
+    }
+
+
+def _ci_source_record() -> dict[str, object]:
+    return {
+        **_source_record(),
+        "id": "ci-202",
+        "type": "ci_failure",
+        "source_revision": "c" * 40,
+        "source_instance_id": "example__tool-ci-202",
+        "source_url": "https://github.com/example/tool/actions/runs/202",
+        "title": "CI failure on parser change",
+        "body": "Workflow: tests\nConclusion: failure\nHead SHA: " + "c" * 40,
+        "labels": ["ci", "failure"],
+        "ci_commands": ["python -m build", "python -m pytest"],
+        "candidate_verifier": {
+            "type": "ci_commands",
+            "commands": ["python -m build", "python -m pytest"],
+        },
     }
 
 
