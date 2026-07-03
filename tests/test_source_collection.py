@@ -187,6 +187,183 @@ class SourceCollectionTests(unittest.TestCase):
             self.assertIn("--allow-partial", first_shard["export_args"])
             self.assertFalse(source_output.exists())
 
+    def test_cli_collection_shard_status_reports_pending_and_blocked_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            schedule_output = root / "schedule.json"
+            status_output = root / "status.json"
+            source_output = root / "source.jsonl"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                schedule_exit_code = main(
+                    [
+                        "registry",
+                        "collection-shards",
+                        "--plan",
+                        str(plan_output),
+                        "--source-output",
+                        str(source_output),
+                        "--summary-output-dir",
+                        str(root / "summaries"),
+                        "--preflight-output-dir",
+                        str(root / "preflight"),
+                        "--shard-size",
+                        "1",
+                        "--github-token-env",
+                        "GITHUB_TOKEN",
+                        "--require-github-token",
+                        "--output",
+                        str(schedule_output),
+                    ]
+                )
+
+            schedule = json.loads(schedule_output.read_text(encoding="utf-8"))
+            first_preflight = Path(schedule["shards"][0]["preflight_output"])
+            first_preflight.parent.mkdir(parents=True, exist_ok=True)
+            first_preflight.write_text(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "ready_for_collection": False,
+                        "selected_tasks": 1,
+                        "issues": [
+                            {
+                                "code": "missing_github_token",
+                                "message": "environment variable GITHUB_TOKEN is not set",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                status_exit_code = main(
+                    [
+                        "registry",
+                        "collection-shard-status",
+                        "--schedule",
+                        str(schedule_output),
+                        "--source",
+                        str(source_output),
+                        "--output",
+                        str(status_output),
+                    ]
+                )
+
+            status = json.loads(status_output.read_text(encoding="utf-8"))
+            self.assertEqual(schedule_exit_code, 0)
+            self.assertEqual(status_exit_code, 2)
+            self.assertFalse(status["ready_for_summary"])
+            self.assertEqual(status["blocked_shards"], 1)
+            self.assertEqual(status["pending_shards"], 1)
+            self.assertEqual(status["source_records"], 0)
+            self.assertEqual(status["shards"][0]["preflight_status"], "blocked")
+            self.assertEqual(status["shards"][0]["next_action"], "resolve_preflight")
+            self.assertEqual(status["shards"][1]["preflight_status"], "missing")
+            self.assertEqual(status["shards"][1]["next_action"], "run_preflight")
+
+    def test_cli_collection_shard_status_accepts_complete_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            schedule_output = root / "schedule.json"
+            status_output = root / "status.json"
+            source_output = root / "source.jsonl"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                schedule_exit_code = main(
+                    [
+                        "registry",
+                        "collection-shards",
+                        "--plan",
+                        str(plan_output),
+                        "--source-output",
+                        str(source_output),
+                        "--summary-output-dir",
+                        str(root / "summaries"),
+                        "--preflight-output-dir",
+                        str(root / "preflight"),
+                        "--shard-size",
+                        "1",
+                        "--output",
+                        str(schedule_output),
+                    ]
+                )
+
+            source_output.write_text(
+                json.dumps(_source_record()) + "\n" + json.dumps(_pr_source_record()) + "\n",
+                encoding="utf-8",
+            )
+            schedule = json.loads(schedule_output.read_text(encoding="utf-8"))
+            for index, shard in enumerate(schedule["shards"]):
+                preflight_output = Path(shard["preflight_output"])
+                summary_output = Path(shard["summary_output"])
+                preflight_output.parent.mkdir(parents=True, exist_ok=True)
+                summary_output.parent.mkdir(parents=True, exist_ok=True)
+                preflight_output.write_text(
+                    json.dumps(
+                        {
+                            "valid": True,
+                            "ready_for_collection": True,
+                            "selected_tasks": 1,
+                            "issues": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                summary_output.write_text(
+                    json.dumps(
+                        {
+                            "valid": True,
+                            "plan_tasks": 2,
+                            "task_offset": index,
+                            "selected_tasks": 1,
+                            "processed_tasks": 1,
+                            "exported": 1,
+                            "allow_partial": True,
+                            "issues": [],
+                            "blocking_issues": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with redirect_stdout(io.StringIO()):
+                status_exit_code = main(
+                    [
+                        "registry",
+                        "collection-shard-status",
+                        "--schedule",
+                        str(schedule_output),
+                        "--source",
+                        str(source_output),
+                        "--output",
+                        str(status_output),
+                    ]
+                )
+
+            status = json.loads(status_output.read_text(encoding="utf-8"))
+            self.assertEqual(schedule_exit_code, 0)
+            self.assertEqual(status_exit_code, 0)
+            self.assertTrue(status["ready_for_summary"])
+            self.assertEqual(status["completed_shards"], 2)
+            self.assertEqual(status["source_records"], 2)
+            self.assertTrue(all(shard["next_action"] == "none" for shard in status["shards"]))
+
     def test_cli_collection_export_writes_auditable_public_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

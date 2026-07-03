@@ -136,6 +136,41 @@ class SourceCollectionShardSchedule:
 
 
 @dataclass
+class SourceCollectionShardStatus:
+    """Per-shard collection status derived from runbook and local artifacts."""
+
+    schedule_shards: int = 0
+    completed_shards: int = 0
+    partial_shards: int = 0
+    blocked_shards: int = 0
+    pending_shards: int = 0
+    invalid_shards: int = 0
+    source_output_path: str = ""
+    source_exists: bool = False
+    source_records: int = 0
+    shards: list[dict[str, Any]] = field(default_factory=list)
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
+
+    @property
+    def ready_for_summary(self) -> bool:
+        return (
+            self.valid
+            and self.schedule_shards > 0
+            and self.completed_shards == self.schedule_shards
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        value["ready_for_summary"] = self.ready_for_summary
+        return value
+
+
+@dataclass
 class SourceExportSummary:
     """Summary of public source records exported from a collection plan."""
 
@@ -679,6 +714,172 @@ def build_source_collection_shard_schedule(
         require_github_token=require_github_token,
         github_token_env=github_token_env,
         shards=shards,
+        issues=issues,
+    )
+
+
+def summarize_source_collection_shard_status(
+    shard_schedule: dict[str, Any],
+    *,
+    source_path: str | Path = "",
+) -> SourceCollectionShardStatus:
+    """Summarize per-shard next actions from a collection runbook and local artifacts."""
+
+    issues: list[SourceCollectionIssue] = []
+    if not isinstance(shard_schedule, dict):
+        return SourceCollectionShardStatus(
+            issues=[
+                SourceCollectionIssue(
+                    code="source_collection_shard_schedule_invalid",
+                    message="Shard schedule must contain a JSON object",
+                )
+            ],
+        )
+
+    raw_shards = shard_schedule.get("shards")
+    if not isinstance(raw_shards, list):
+        source_text = str(source_path or shard_schedule.get("source_output_path") or "")
+        return SourceCollectionShardStatus(
+            source_output_path=source_text,
+            issues=[
+                SourceCollectionIssue(
+                    code="source_collection_shard_schedule_invalid",
+                    message="Shard schedule must contain a shards list",
+                )
+            ],
+        )
+
+    if not shard_schedule.get("valid", False):
+        issues.append(
+            SourceCollectionIssue(
+                code="source_collection_shard_schedule_invalid",
+                message="Shard schedule is not valid",
+            )
+        )
+
+    source_text = str(source_path or shard_schedule.get("source_output_path") or "")
+    source_exists = False
+    source_records = 0
+    if source_text:
+        source_file = Path(source_text)
+        source_exists = source_file.exists()
+        if source_exists:
+            try:
+                source_records = len(_existing_export_records(source_file))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                issues.append(
+                    SourceCollectionIssue(
+                        code="source_records_invalid",
+                        message=f"Source output cannot be read as source-record JSONL: {exc}",
+                    )
+                )
+
+    shard_statuses: list[dict[str, Any]] = []
+    for shard_index, raw_shard in enumerate(raw_shards):
+        if not isinstance(raw_shard, dict):
+            issues.append(
+                SourceCollectionIssue(
+                    code="source_collection_shard_invalid",
+                    message=f"Shard entry {shard_index} must contain a JSON object",
+                    record_index=shard_index,
+                )
+            )
+            shard_statuses.append(
+                {
+                    "shard_id": f"collection-shard-{shard_index:04d}",
+                    "status": "invalid",
+                    "next_action": "inspect_artifact",
+                    "issues": ["shard entry must contain a JSON object"],
+                }
+            )
+            continue
+
+        preflight_status, preflight_payload, preflight_issue = _read_collection_artifact(
+            raw_shard.get("preflight_output")
+        )
+        export_status, export_payload, export_issue = _read_collection_artifact(
+            raw_shard.get("summary_output")
+        )
+        if preflight_issue:
+            issues.append(preflight_issue)
+        if export_issue:
+            issues.append(export_issue)
+
+        preflight_issue_texts: list[str] = []
+        if preflight_status == "present":
+            preflight_ready = bool(preflight_payload.get("ready_for_collection"))
+            preflight_valid = bool(preflight_payload.get("valid"))
+            preflight_issue_texts = _artifact_issue_texts(preflight_payload.get("issues"))
+            preflight_state = "ready" if preflight_ready and preflight_valid else "blocked"
+        else:
+            preflight_state = preflight_status
+
+        exported = 0
+        processed_tasks = 0
+        export_issue_texts: list[str] = []
+        if export_status == "present":
+            exported = _int_field(export_payload.get("exported"))
+            processed_tasks = _int_field(export_payload.get("processed_tasks"))
+            selected_tasks = _int_field(
+                export_payload.get("selected_tasks"),
+                default=_int_field(raw_shard.get("selected_tasks")),
+            )
+            blocking_issues = _artifact_issue_texts(export_payload.get("blocking_issues"))
+            export_issue_texts = [
+                *blocking_issues,
+                *_artifact_issue_texts(export_payload.get("issues")),
+            ]
+            allow_partial = bool(export_payload.get("allow_partial"))
+            if blocking_issues:
+                export_state = "blocked"
+            elif bool(export_payload.get("valid")) or (
+                selected_tasks > 0 and processed_tasks >= selected_tasks and not export_issue_texts
+            ):
+                export_state = "complete"
+            elif export_issue_texts and allow_partial and exported > 0:
+                export_state = "partial"
+            elif export_issue_texts:
+                export_state = "failed"
+            else:
+                export_state = "incomplete"
+        else:
+            export_state = export_status
+
+        shard_state, next_action = _collection_shard_next_action(
+            preflight_state,
+            export_state,
+        )
+        shard_statuses.append(
+            {
+                "shard_id": _text(raw_shard.get("shard_id"))
+                or f"collection-shard-{shard_index:04d}",
+                "task_offset": _int_field(raw_shard.get("task_offset")),
+                "max_tasks": _int_field(raw_shard.get("max_tasks")),
+                "selected_tasks": _int_field(raw_shard.get("selected_tasks")),
+                "preflight_output": _text(raw_shard.get("preflight_output")),
+                "summary_output": _text(raw_shard.get("summary_output")),
+                "preflight_status": preflight_state,
+                "export_status": export_state,
+                "status": shard_state,
+                "next_action": next_action,
+                "exported": exported,
+                "processed_tasks": processed_tasks,
+                "issues": _unique_strings([*preflight_issue_texts, *export_issue_texts]),
+            }
+        )
+
+    counts = Counter(_text(shard.get("status")) for shard in shard_statuses)
+    return SourceCollectionShardStatus(
+        schedule_shards=len(raw_shards),
+        completed_shards=counts.get("complete", 0),
+        partial_shards=counts.get("partial", 0),
+        blocked_shards=counts.get("blocked", 0),
+        pending_shards=counts.get("pending", 0),
+        invalid_shards=counts.get("invalid", 0),
+        source_output_path=source_text,
+        source_exists=source_exists,
+        source_records=source_records,
+        shards=shard_statuses,
         issues=issues,
     )
 
@@ -1501,6 +1702,75 @@ def _summary_issue_messages(value: Any) -> list[str]:
         if message:
             messages.append(message)
     return messages
+
+
+def _artifact_issue_texts(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    messages = []
+    for item in value:
+        if isinstance(item, str):
+            message = item.strip()
+        elif isinstance(item, dict):
+            code = _text(item.get("code"))
+            text = _text(item.get("message") or item.get("issue"))
+            if code and text and not text.startswith(code):
+                message = f"{code}: {text}"
+            else:
+                message = text or code
+        else:
+            message = _text(item)
+        if message:
+            messages.append(message)
+    return messages
+
+
+def _read_collection_artifact(
+    path_value: Any,
+) -> tuple[str, dict[str, Any], SourceCollectionIssue | None]:
+    path_text = _text(path_value)
+    if not path_text:
+        return "missing", {}, None
+    path = Path(path_text)
+    if not path.exists():
+        return "missing", {}, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (
+            "invalid",
+            {},
+            SourceCollectionIssue(
+                code="source_collection_artifact_invalid",
+                message=f"Source collection artifact cannot be read as JSON: {path_text}: {exc}",
+            ),
+        )
+    if not isinstance(payload, dict):
+        return (
+            "invalid",
+            {},
+            SourceCollectionIssue(
+                code="source_collection_artifact_invalid",
+                message=f"Source collection artifact must contain a JSON object: {path_text}",
+            ),
+        )
+    return "present", payload, None
+
+
+def _collection_shard_next_action(preflight_status: str, export_status: str) -> tuple[str, str]:
+    if preflight_status == "invalid" or export_status == "invalid":
+        return "invalid", "inspect_artifact"
+    if export_status == "complete":
+        return "complete", "none"
+    if export_status == "partial":
+        return "partial", "plan_retry"
+    if export_status in {"blocked", "failed", "incomplete"}:
+        return "blocked", "plan_retry"
+    if preflight_status == "blocked":
+        return "blocked", "resolve_preflight"
+    if preflight_status == "ready":
+        return "pending", "run_export"
+    return "pending", "run_preflight"
 
 
 def _unique_strings(values: Iterable[str]) -> list[str]:

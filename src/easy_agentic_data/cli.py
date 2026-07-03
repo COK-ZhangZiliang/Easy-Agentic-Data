@@ -95,6 +95,7 @@ from easy_agentic_data.source_collection import (
     run_source_collection_retry_plan,
     split_public_source_records,
     summarize_source_collection_preflight,
+    summarize_source_collection_shard_status,
     summarize_source_collection_readiness,
 )
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
@@ -371,6 +372,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_shards_parser.add_argument("--github-token-env", default="")
     collection_shards_parser.add_argument("--require-github-token", action="store_true")
     collection_shards_parser.add_argument("--output", default="")
+    collection_shard_status_parser = registry_subparsers.add_parser("collection-shard-status")
+    collection_shard_status_parser.add_argument("--schedule", required=True)
+    collection_shard_status_parser.add_argument("--source", default="")
+    collection_shard_status_parser.add_argument("--output", default="")
     collection_preflight_parser = registry_subparsers.add_parser("collection-preflight")
     collection_preflight_parser.add_argument("--plan", required=True)
     collection_preflight_parser.add_argument("--source", default="")
@@ -798,6 +803,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if schedule.valid else 2
+        if args.registry_command == "collection-shard-status":
+            status = summarize_source_collection_shard_status(
+                json.loads(Path(args.schedule).read_text(encoding="utf-8")),
+                source_path=args.source,
+            )
+            payload = status.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if status.ready_for_summary else 2
         if args.registry_command == "collection-preflight":
             preflight = summarize_source_collection_preflight(
                 json.loads(Path(args.plan).read_text(encoding="utf-8")),
