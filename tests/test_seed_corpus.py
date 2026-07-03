@@ -31,6 +31,8 @@ class SeedCorpusTests(unittest.TestCase):
             )
             self.assertEqual(manifest["scenario_audit"]["trainable"], 12)
             self.assertEqual(manifest["quarantine"], {"records": 0, "issues": []})
+            self.assertTrue(manifest["repository_allowlist"]["audit"]["valid"])
+            self.assertEqual(manifest["repository_allowlist"]["filters"][0]["allowed"], 1)
             self.assertEqual(len(manifest["source_snapshots"]), 3)
             self.assertIn(
                 "repository_synthetic",
@@ -90,18 +92,51 @@ class SeedCorpusTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "already contains entries"):
                 build_seed_corpus(config_path)
 
+    def test_build_seed_corpus_quarantines_records_outside_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = _write_corpus_inputs(
+                root,
+                extra_public_records=[
+                    {**_public_issue_record(), "id": "issue-200", "repository": "other/tool"}
+                ],
+                coverage_budgets={
+                    "min_task_family_counts": {
+                        family: 1 for family in sorted(SUPPORTED_TASK_FAMILIES)
+                    },
+                    "min_language_counts": {"python": 1},
+                    "max_quarantined_records": 1,
+                },
+            )
+
+            manifest = build_seed_corpus(config_path, overwrite_outputs=True)
+
+            self.assertTrue(manifest["valid"])
+            self.assertEqual(manifest["quarantine"]["records"], 1)
+            self.assertIn("not allowlisted", manifest["quarantine"]["issues"][0])
+
 
 def _write_corpus_inputs(
     root: Path,
     *,
     coverage_budgets: dict[str, object] | None = None,
+    extra_public_records: list[dict[str, object]] | None = None,
 ) -> Path:
     public_source = root / "public.jsonl"
     synthetic_source = root / "synthetic.json"
     holdout_source = root / "holdout.jsonl"
-    public_source.write_text(json.dumps(_public_issue_record()) + "\n", encoding="utf-8")
+    public_records = [_public_issue_record(), *(extra_public_records or [])]
+    public_source.write_text(
+        "\n".join(json.dumps(record) for record in public_records) + "\n",
+        encoding="utf-8",
+    )
     synthetic_source.write_text(json.dumps(_repository_synthesis_spec()) + "\n", encoding="utf-8")
     holdout_source.write_text(json.dumps(_swe_bench_record()) + "\n", encoding="utf-8")
+    allowlist_source = root / "allowlist.json"
+    allowlist_source.write_text(
+        json.dumps({"repositories": [_allowlist_record()]}),
+        encoding="utf-8",
+    )
     config = {
         "train_registry_root": "train",
         "holdout_registry_root": "holdout",
@@ -110,6 +145,7 @@ def _write_corpus_inputs(
         "scenario_audit_output": "scenario-audit.json",
         "review_queue_output": "seed-review.jsonl",
         "overwrite_outputs": True,
+        "repository_allowlist": allowlist_source.name,
         "public_issue_sources": [
             {
                 "path": public_source.name,
@@ -163,6 +199,17 @@ def _write_corpus_inputs(
 
 def _synthetic_task_families() -> list[str]:
     return sorted(set(DEFAULT_REPOSITORY_SYNTHETIC_TASK_FAMILIES) | {"feature_implementation"})
+
+
+def _allowlist_record() -> dict[str, object]:
+    return {
+        "repository": "example/tool",
+        "source_uri": "https://github.com/example/tool.git",
+        "license": "MIT",
+        "language": "Python",
+        "collection_sources": ["issues", "pull_requests"],
+        "test_commands": ["python -m pytest tests/test_parser.py"],
+    }
 
 
 def _public_issue_record() -> dict[str, object]:

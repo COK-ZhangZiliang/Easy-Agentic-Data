@@ -1,0 +1,18 @@
+{
+  "schema_version": "easy_agentic_data.repository_allowlist.v1",
+  "repositories": [
+    {
+      "repository": "example/tool",
+      "source_uri": "https://github.com/example/tool.git",
+      "license": "MIT",
+      "language": "Python",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "parser"],
+      "pr_labels": ["review", "refactor"],
+      "test_commands": ["python -m pytest tests/test_parser.py"],
+      "ci_commands": ["python -m pytest", "python -m build"],
+      "benchmark_overlap": false,
+      "notes": "Demo allowlist entry. Replace with audited public repositories before production use."
+    }
+  ]
+}

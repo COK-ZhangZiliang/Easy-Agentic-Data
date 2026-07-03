@@ -20,6 +20,12 @@ from easy_agentic_data.registry_sources import (
     import_swe_style_records,
     load_source_records,
 )
+from easy_agentic_data.repository_allowlist import (
+    AllowlistFilterSummary,
+    audit_repository_allowlist,
+    filter_records_by_allowlist,
+    load_repository_allowlist,
+)
 from easy_agentic_data.repository_synthetic import (
     DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST,
     RepositorySyntheticSummary,
@@ -59,6 +65,20 @@ def build_seed_corpus(
     _prepare_registry_root(train_root, overwrite=overwrite_registries)
     if holdout_root is not None:
         _prepare_registry_root(holdout_root, overwrite=overwrite_registries)
+    allowlist_path = _optional_path(config_dir, config.get("repository_allowlist"))
+    allowlist_records = load_repository_allowlist(allowlist_path) if allowlist_path else []
+    allowlist_audit = (
+        audit_repository_allowlist(
+            allowlist_records,
+            license_allowlist=sorted(
+                set(DEFAULT_TRAIN_LICENSE_ALLOWLIST)
+                | set(_string_list(config.get("allow_train_licenses")))
+            ),
+            benchmark_repositories=_string_list(config.get("benchmark_repositories")),
+        )
+        if allowlist_path is not None
+        else None
+    )
     train_registry = ScenarioRegistry(train_root)
     train_registry.initialize()
     holdout_registry = ScenarioRegistry(holdout_root) if holdout_root is not None else None
@@ -66,6 +86,7 @@ def build_seed_corpus(
         holdout_registry.initialize()
 
     import_summaries = []
+    allowlist_filters: list[AllowlistFilterSummary] = []
     import_summaries.extend(
         _import_record_sources(
             train_registry,
@@ -74,6 +95,8 @@ def build_seed_corpus(
             default_format="public_issue_pr",
             default_split="train",
             default_train_eligible=None,
+            allowlist_records=allowlist_records,
+            allowlist_filters=allowlist_filters,
         )
     )
     import_summaries.extend(
@@ -84,6 +107,8 @@ def build_seed_corpus(
             default_format="auto",
             default_split="train",
             default_train_eligible=None,
+            allowlist_records=allowlist_records,
+            allowlist_filters=allowlist_filters,
         )
     )
     synthetic_summaries = _generate_synthetic_sources(
@@ -92,6 +117,8 @@ def build_seed_corpus(
         config_dir=config_dir,
         default_split="train",
         default_train_eligible=None,
+        allowlist_records=allowlist_records,
+        allowlist_filters=allowlist_filters,
     )
     holdout_summaries: list[dict[str, Any]] = []
     if holdout_registry is not None:
@@ -135,7 +162,12 @@ def build_seed_corpus(
         benchmark_sources=benchmark_sources,
         holdout_scenarios=holdout_scenarios,
     )
-    quarantine = _quarantine_summary(import_summaries, synthetic_summaries, holdout_summaries)
+    quarantine = _quarantine_summary(
+        import_summaries,
+        synthetic_summaries,
+        holdout_summaries,
+        allowlist_filters,
+    )
     coverage_budget = _coverage_budget_report(
         seed_audit_payload,
         config.get("coverage_budgets", {}),
@@ -163,6 +195,7 @@ def build_seed_corpus(
 
     scale_decision = _dict(config.get("scale_decision", {}))
     validation = {
+        "allowlist_valid": allowlist_audit.valid if allowlist_audit is not None else True,
         "registry_valid": train_validation.valid
         and (holdout_validation.valid if holdout_validation is not None else True),
         "seed_audit_valid": seed_audit.valid,
@@ -189,6 +222,12 @@ def build_seed_corpus(
         "train_registry_root": str(train_root),
         "holdout_registry_root": str(holdout_root) if holdout_root is not None else "",
         "benchmark_sources": benchmark_sources,
+        "repository_allowlist": {
+            "path": str(allowlist_path) if allowlist_path else "",
+            "sha256": _file_sha256(allowlist_path) if allowlist_path else "",
+            "audit": allowlist_audit.to_dict() if allowlist_audit is not None else None,
+            "filters": [summary.to_dict() for summary in allowlist_filters],
+        },
         "source_snapshots": _source_snapshots(config, config_dir),
         "imports": [summary.to_dict() for summary in import_summaries],
         "synthetic_generation": [summary.to_dict() for summary in synthetic_summaries],
@@ -233,11 +272,22 @@ def _import_record_sources(
     default_format: str,
     default_split: str,
     default_train_eligible: bool | None,
+    allowlist_records: Iterable[dict[str, Any]] = (),
+    allowlist_filters: list[AllowlistFilterSummary] | None = None,
 ) -> list[RegistryImportSummary]:
     summaries = []
     for source in sources:
         source_path = _required_source_path(config_dir, source)
         source_format = _source_format(source, default_format)
+        records = load_source_records(source_path)
+        if allowlist_records and str(source.get("split", default_split)) == "train":
+            records, filter_summary = filter_records_by_allowlist(
+                records,
+                allowlist_records,
+                source_name=str(source.get("source_name", "")) or source_format,
+            )
+            if allowlist_filters is not None:
+                allowlist_filters.append(filter_summary)
         train_eligible = _train_eligible(
             source.get("train_eligible", default_train_eligible)
         )
@@ -245,7 +295,7 @@ def _import_record_sources(
             summaries.append(
                 import_public_issue_pr_records(
                     registry,
-                    load_source_records(source_path),
+                    records,
                     source_format=source_format,
                     source_name=str(source.get("source_name", "")),
                     split=str(source.get("split", default_split)),
@@ -269,7 +319,7 @@ def _import_record_sources(
             summaries.append(
                 import_swe_style_records(
                     registry,
-                    load_source_records(source_path),
+                    records,
                     source_format=source_format,
                     source_name=str(source.get("source_name", "")),
                     split=str(source.get("split", default_split)),
@@ -295,14 +345,25 @@ def _generate_synthetic_sources(
     config_dir: Path,
     default_split: str,
     default_train_eligible: bool | None,
+    allowlist_records: Iterable[dict[str, Any]] = (),
+    allowlist_filters: list[AllowlistFilterSummary] | None = None,
 ) -> list[RepositorySyntheticSummary]:
     summaries = []
     for source in sources:
         source_path = _required_source_path(config_dir, source)
+        specs = load_repository_synthesis_specs(source_path)
+        if allowlist_records and str(source.get("split", default_split)) == "train":
+            specs, filter_summary = filter_records_by_allowlist(
+                specs,
+                allowlist_records,
+                source_name=str(source.get("source_name", "repository_synthetic")),
+            )
+            if allowlist_filters is not None:
+                allowlist_filters.append(filter_summary)
         summaries.append(
             generate_repository_synthetic_scenarios(
                 registry,
-                load_repository_synthesis_specs(source_path),
+                specs,
                 source_name=str(source.get("source_name", "repository_synthetic")),
                 split=str(source.get("split", default_split)),
                 task_families=_string_list(source.get("task_families")),
@@ -397,6 +458,7 @@ def _quarantine_summary(
     import_summaries: Iterable[RegistryImportSummary],
     synthetic_summaries: Iterable[RepositorySyntheticSummary],
     holdout_summaries: Iterable[dict[str, Any]],
+    allowlist_filters: Iterable[AllowlistFilterSummary],
 ) -> dict[str, Any]:
     records = 0
     issues = []
@@ -409,6 +471,9 @@ def _quarantine_summary(
     for summary in holdout_summaries:
         records += int(summary.get("skipped", 0) or 0)
         issues.extend(summary.get("issues", []))
+    for summary in allowlist_filters:
+        records += summary.quarantined
+        issues.extend(summary.issues)
     return {"records": records, "issues": issues}
 
 

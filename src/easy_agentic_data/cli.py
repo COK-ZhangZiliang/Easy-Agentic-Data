@@ -62,6 +62,10 @@ from easy_agentic_data.registry_sources import (
     import_swe_style_records,
     load_source_records,
 )
+from easy_agentic_data.repository_allowlist import (
+    audit_repository_allowlist,
+    load_repository_allowlist,
+)
 from easy_agentic_data.repository_synthetic import (
     DEFAULT_SYNTHETIC_TRAIN_LICENSE_ALLOWLIST,
     generate_repository_synthetic_scenarios,
@@ -265,6 +269,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--overwrite-outputs",
         action="store_true",
         help="Overwrite append-only review queue outputs declared by the corpus config",
+    )
+    allowlist_audit_parser = registry_subparsers.add_parser("allowlist-audit")
+    allowlist_audit_parser.add_argument("--source", required=True)
+    allowlist_audit_parser.add_argument("--output", default="")
+    allowlist_audit_parser.add_argument(
+        "--allow-train-license",
+        action="append",
+        default=[],
+        help="Additional license identifier allowed for train-eligible repositories",
+    )
+    allowlist_audit_parser.add_argument(
+        "--benchmark-repository",
+        action="append",
+        default=[],
+        help="Repository name that must be treated as benchmark-overlapping",
     )
     inspect_parser = registry_subparsers.add_parser("inspect")
     inspect_parser.add_argument("--root", required=True)
@@ -559,6 +578,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0 if manifest["valid"] else 2
+        if args.registry_command == "allowlist-audit":
+            audit = audit_repository_allowlist(
+                load_repository_allowlist(args.source),
+                license_allowlist=sorted(
+                    set(DEFAULT_TRAIN_LICENSE_ALLOWLIST) | set(args.allow_train_license)
+                ),
+                benchmark_repositories=args.benchmark_repository,
+            )
+            payload = audit.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if audit.valid else 2
         registry = ScenarioRegistry(args.root)
         if args.registry_command == "list":
             print(json.dumps(registry.list_scenarios(), indent=2))

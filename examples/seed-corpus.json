@@ -6,6 +6,7 @@
   "seed_audit_output": "../runs/seed-corpus-demo/seed-audit.json",
   "scenario_audit_output": "../runs/seed-corpus-demo/scenario-audit.json",
   "review_queue_output": "../runs/seed-corpus-demo/seed-review.jsonl",
+  "repository_allowlist": "repository-allowlist.json",
   "overwrite_outputs": true,
   "overwrite_registries": true,
   "public_issue_sources": [

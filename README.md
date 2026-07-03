@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-147%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-154%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -225,6 +225,10 @@ sources, runs seed and scenario audits, writes the human-review queue, and freez
 pilot or shard selection:
 
 ```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \
+  --source examples/repository-allowlist.json \
+  --output runs/seed-corpus-demo/repository-allowlist-audit.json
+
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry build-corpus \
   --config examples/seed-corpus.json \
   --overwrite-outputs
@@ -233,7 +237,9 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry build-corpus \
 The manifest's `valid` field means the corpus passed local registry, coverage, decontamination,
 and review-queue gates. It does not approve a large provider run by itself; `approved_for_scale`
 only becomes true when the manifest is valid and the run-specific scale decision explicitly records
-approval after human review and pilot quality checks.
+approval after human review and pilot quality checks. When the config declares a repository
+allowlist, train-source records and repository-grounded synthetic specs outside that allowlist are
+quarantined before import and counted against the configured quarantine budget.
 
 The policy gate fails when the trainable pool is too small, a required task family or verifier is
 missing, one family/source/repository/language dominates the trainable pool, or a trainable seed
