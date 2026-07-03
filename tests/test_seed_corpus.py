@@ -8,8 +8,8 @@ from pathlib import Path
 from easy_agentic_data.cli import main
 from easy_agentic_data.registry import ScenarioRegistry
 from easy_agentic_data.repository_synthetic import DEFAULT_REPOSITORY_SYNTHETIC_TASK_FAMILIES
-from easy_agentic_data.seed_corpus import build_seed_corpus
-from easy_agentic_data.seed_library import SUPPORTED_TASK_FAMILIES
+from easy_agentic_data.seed_corpus import build_seed_corpus, rehearse_registry_import
+from easy_agentic_data.seed_library import SUPPORTED_TASK_FAMILIES, SeedLibraryPolicy
 
 PINNED_IMAGE = "python@sha256:" + ("c" * 64)
 
@@ -115,6 +115,90 @@ class SeedCorpusTests(unittest.TestCase):
             self.assertEqual(manifest["quarantine"]["records"], 1)
             self.assertIn("not allowlisted", manifest["quarantine"]["issues"][0])
 
+    def test_rehearse_registry_import_gates_public_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "public.jsonl"
+            allowlist = root / "allowlist.json"
+            source.write_text(json.dumps(_public_issue_record()) + "\n", encoding="utf-8")
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+
+            rehearsal = rehearse_registry_import(
+                registry_root=root / "rehearsal",
+                source_path=source,
+                source_format="public-issue",
+                source_name="curated-public-issues",
+                allowlist_path=allowlist,
+                min_imported=1,
+                max_quarantined=0,
+                seed_policy=_seed_policy_for_public_probe(),
+            )
+
+            self.assertTrue(rehearsal["valid"])
+            self.assertEqual(rehearsal["import"]["imported"], 1)
+            self.assertEqual(rehearsal["allowlist_filter"]["allowed"], 1)
+            self.assertTrue(rehearsal["registry_validation"]["valid"])
+            self.assertTrue(rehearsal["seed_audit"]["valid"])
+            self.assertEqual(
+                len(ScenarioRegistry(root / "rehearsal").list_scenarios()),
+                1,
+            )
+
+    def test_cli_import_rehearsal_returns_nonzero_when_policy_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "public.jsonl"
+            allowlist = root / "allowlist.json"
+            output = root / "rehearsal.json"
+            source.write_text(json.dumps(_public_issue_record()) + "\n", encoding="utf-8")
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "import-rehearsal",
+                        "--root",
+                        str(root / "rehearsal"),
+                        "--source",
+                        str(source),
+                        "--format",
+                        "public-issue",
+                        "--source-name",
+                        "curated-public-issues",
+                        "--allowlist",
+                        str(allowlist),
+                        "--min-imported",
+                        "1",
+                        "--max-quarantined",
+                        "0",
+                        "--min-train-eligible",
+                        "1",
+                        "--require-task-family",
+                        "code-review",
+                        "--require-verifier-type",
+                        "hidden-command",
+                        "--output",
+                        str(output),
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            disk_payload = json.loads(output.read_text(encoding="utf-8"))
+            codes = {issue["code"] for issue in payload["seed_audit"]["issues"]}
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(payload["valid"])
+            self.assertFalse(payload["validation"]["seed_audit_valid"])
+            self.assertEqual(payload, disk_payload)
+            self.assertIn("missing_required_task_family", codes)
+
 
 def _write_corpus_inputs(
     root: Path,
@@ -199,6 +283,14 @@ def _write_corpus_inputs(
 
 def _synthetic_task_families() -> list[str]:
     return sorted(set(DEFAULT_REPOSITORY_SYNTHETIC_TASK_FAMILIES) | {"feature_implementation"})
+
+
+def _seed_policy_for_public_probe():
+    return SeedLibraryPolicy(
+        min_train_eligible=1,
+        required_task_families=["bug_repair"],
+        required_verifier_types=["hidden_command"],
+    )
 
 
 def _allowlist_record() -> dict[str, object]:

@@ -44,6 +44,7 @@ from easy_agentic_data.seed_library import (
 from easy_agentic_data.seed_review import build_seed_review_queue
 
 SEED_CORPUS_SCHEMA_VERSION = "easy_agentic_data.seed_corpus.v1"
+REGISTRY_IMPORT_REHEARSAL_SCHEMA_VERSION = "easy_agentic_data.registry_import_rehearsal.v1"
 
 
 def build_seed_corpus(
@@ -262,6 +263,174 @@ def build_seed_corpus(
     manifest["manifest_output"] = str(manifest_path)
     _write_json(manifest_path, manifest)
     return manifest
+
+
+def rehearse_registry_import(
+    *,
+    registry_root: str | Path,
+    source_path: str | Path,
+    source_format: str = "public_issue_pr",
+    source_name: str = "",
+    allowlist_path: str | Path | None = None,
+    split: str = "train",
+    license_name: str = "",
+    permitted_use: str = "research",
+    test_command_template: str = "",
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] = (),
+    coverage_tags: Iterable[str] = (),
+    allow_train_licenses: Iterable[str] = (),
+    limit: int | None = None,
+    strict: bool = False,
+    overwrite_registry: bool = False,
+    min_imported: int = 1,
+    max_quarantined: int = 0,
+    seed_policy: SeedLibraryPolicy | None = None,
+    benchmark_sources: Iterable[str] = DEFAULT_BENCHMARK_SOURCE_ALIASES,
+) -> dict[str, Any]:
+    """Import source records into a temporary registry and run pre-materialization gates."""
+
+    root = Path(registry_root)
+    source = Path(source_path)
+    _prepare_registry_root(root, overwrite=overwrite_registry)
+    registry = ScenarioRegistry(root)
+    registry.initialize()
+    records = load_source_records(source)
+    normalized_format = source_format.replace("-", "_")
+    allowlist_filter = None
+    if allowlist_path is not None:
+        records, allowlist_filter = filter_records_by_allowlist(
+            records,
+            load_repository_allowlist(allowlist_path),
+            source_name=source_name or normalized_format,
+        )
+    if normalized_format in PUBLIC_ISSUE_PR_FORMATS:
+        import_summary = import_public_issue_pr_records(
+            registry,
+            records,
+            source_format=normalized_format,
+            source_name=source_name,
+            split=split,
+            license_name=license_name,
+            permitted_use=permitted_use,
+            limit=limit,
+            test_command_template=test_command_template,
+            task_family=task_family,
+            source_method=source_method,
+            train_eligible=train_eligible,
+            contamination_tags=contamination_tags,
+            coverage_tags=coverage_tags,
+            train_license_allowlist=sorted(
+                set(DEFAULT_TRAIN_LICENSE_ALLOWLIST) | set(allow_train_licenses)
+            ),
+            strict=strict,
+        )
+    else:
+        import_summary = import_swe_style_records(
+            registry,
+            records,
+            source_format=normalized_format,
+            source_name=source_name,
+            split=split,
+            license_name=license_name,
+            permitted_use=permitted_use,
+            limit=limit,
+            test_command_template=test_command_template,
+            task_family=task_family,
+            source_method=source_method,
+            train_eligible=train_eligible,
+            contamination_tags=contamination_tags,
+            coverage_tags=coverage_tags,
+            strict=strict,
+        )
+
+    registry_validation = registry.validate()
+    seeds = registry.list_seeds()
+    policy = seed_policy or SeedLibraryPolicy()
+    seed_audit = audit_seed_library(
+        seeds,
+        benchmark_sources=benchmark_sources,
+        policy=policy,
+        holdout_seeds=list(seeds),
+    )
+    seed_audit_payload = seed_audit.to_dict()
+    seed_audit_payload["train_verifier_type_counts"] = _train_verifier_type_counts(seeds)
+    quarantined = import_summary.skipped
+    if allowlist_filter is not None:
+        quarantined += allowlist_filter.quarantined
+    gate_issues = _import_rehearsal_gate_issues(
+        imported=import_summary.imported,
+        min_imported=min_imported,
+        quarantined=quarantined,
+        max_quarantined=max_quarantined,
+    )
+    validation = {
+        "imported_minimum_valid": import_summary.imported >= max(0, min_imported),
+        "quarantine_budget_valid": quarantined <= max(0, max_quarantined),
+        "registry_valid": registry_validation.valid,
+        "seed_audit_valid": seed_audit.valid,
+    }
+    valid = all(validation.values())
+    return {
+        "schema_version": REGISTRY_IMPORT_REHEARSAL_SCHEMA_VERSION,
+        "registry_root": str(root),
+        "source": {
+            "path": str(source),
+            "sha256": _file_sha256(source),
+            "format": normalized_format,
+            "source_name": source_name or normalized_format,
+        },
+        "allowlist_filter": allowlist_filter.to_dict() if allowlist_filter is not None else None,
+        "import": import_summary.to_dict(),
+        "quarantine": {
+            "records": quarantined,
+            "issues": list(import_summary.issues)
+            + (allowlist_filter.issues if allowlist_filter is not None else []),
+        },
+        "registry_validation": _registry_validation_payload(registry_validation),
+        "seed_policy": asdict(policy),
+        "seed_audit": seed_audit_payload,
+        "gate_issues": gate_issues,
+        "validation": validation,
+        "valid": valid,
+    }
+
+
+def _import_rehearsal_gate_issues(
+    *,
+    imported: int,
+    min_imported: int,
+    quarantined: int,
+    max_quarantined: int,
+) -> list[dict[str, Any]]:
+    issues = []
+    required = max(0, min_imported)
+    allowed_quarantine = max(0, max_quarantined)
+    if imported < required:
+        issues.append(
+            {
+                "code": "min_imported_not_met",
+                "message": (
+                    f"Imported source record count {imported} is below "
+                    f"required minimum {required}"
+                ),
+                "severity": "error",
+            }
+        )
+    if quarantined > allowed_quarantine:
+        issues.append(
+            {
+                "code": "quarantine_budget_exceeded",
+                "message": (
+                    f"Quarantined source records {quarantined} exceeds budget "
+                    f"{allowed_quarantine}"
+                ),
+                "severity": "error",
+            }
+        )
+    return issues
 
 
 def _import_record_sources(

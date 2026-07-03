@@ -81,7 +81,7 @@ from easy_agentic_data.seed_library import (
     SeedLibraryPolicy,
     audit_seed_library,
 )
-from easy_agentic_data.seed_corpus import build_seed_corpus
+from easy_agentic_data.seed_corpus import build_seed_corpus, rehearse_registry_import
 from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
@@ -276,6 +276,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Overwrite append-only review queue outputs declared by the corpus config",
     )
+    import_rehearsal_parser = registry_subparsers.add_parser("import-rehearsal")
+    import_rehearsal_parser.add_argument("--root", required=True)
+    import_rehearsal_parser.add_argument("--source", required=True)
+    import_rehearsal_parser.add_argument(
+        "--format",
+        default="public-issue-pr",
+        choices=[
+            "auto",
+            "swe-bench",
+            "swe-smith",
+            "multi-swe",
+            "public-issue",
+            "public-pr",
+            "public-issue-pr",
+        ],
+    )
+    import_rehearsal_parser.add_argument("--source-name", default="")
+    import_rehearsal_parser.add_argument("--allowlist", default="")
+    import_rehearsal_parser.add_argument(
+        "--split",
+        default="train",
+        choices=["train", "validation", "evaluation", "dev", "eval_holdout", "quarantined"],
+    )
+    import_rehearsal_parser.add_argument("--license", default="")
+    import_rehearsal_parser.add_argument("--permitted-use", default="research")
+    import_rehearsal_parser.add_argument("--task-family", default="")
+    import_rehearsal_parser.add_argument("--source-method", default="")
+    import_rehearsal_parser.add_argument(
+        "--train-eligible",
+        default="auto",
+        choices=["auto", "true", "false"],
+    )
+    import_rehearsal_parser.add_argument("--contamination-tag", action="append", default=[])
+    import_rehearsal_parser.add_argument("--coverage-tag", action="append", default=[])
+    import_rehearsal_parser.add_argument("--allow-train-license", action="append", default=[])
+    import_rehearsal_parser.add_argument("--benchmark-source", action="append", default=[])
+    import_rehearsal_parser.add_argument("--limit", type=int)
+    import_rehearsal_parser.add_argument("--test-command-template", default="")
+    import_rehearsal_parser.add_argument("--strict", action="store_true")
+    import_rehearsal_parser.add_argument("--overwrite-registry", action="store_true")
+    import_rehearsal_parser.add_argument("--min-imported", type=int, default=1)
+    import_rehearsal_parser.add_argument("--max-quarantined", type=int, default=0)
+    import_rehearsal_parser.add_argument("--min-train-eligible", type=int, default=0)
+    import_rehearsal_parser.add_argument("--require-task-family", action="append", default=[])
+    import_rehearsal_parser.add_argument("--require-verifier-type", action="append", default=[])
+    import_rehearsal_parser.add_argument("--max-task-family-share", type=float, default=1.0)
+    import_rehearsal_parser.add_argument("--max-source-method-share", type=float, default=1.0)
+    import_rehearsal_parser.add_argument("--max-repository-share", type=float, default=1.0)
+    import_rehearsal_parser.add_argument("--max-language-share", type=float, default=1.0)
+    import_rehearsal_parser.add_argument("--output", default="")
     allowlist_audit_parser = registry_subparsers.add_parser("allowlist-audit")
     allowlist_audit_parser.add_argument("--source", required=True)
     allowlist_audit_parser.add_argument("--output", default="")
@@ -707,6 +757,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if readiness.ready_for_import else 2
+        if args.registry_command == "import-rehearsal":
+            benchmark_sources = sorted(
+                set(DEFAULT_BENCHMARK_SOURCE_ALIASES) | set(args.benchmark_source)
+            )
+            payload = rehearse_registry_import(
+                registry_root=args.root,
+                source_path=args.source,
+                source_format=args.format,
+                source_name=args.source_name,
+                allowlist_path=args.allowlist or None,
+                split=args.split,
+                license_name=args.license,
+                permitted_use=args.permitted_use,
+                test_command_template=args.test_command_template,
+                task_family=args.task_family,
+                source_method=args.source_method,
+                train_eligible=_parse_train_eligible(args.train_eligible),
+                contamination_tags=args.contamination_tag,
+                coverage_tags=args.coverage_tag,
+                allow_train_licenses=args.allow_train_license,
+                limit=args.limit,
+                strict=args.strict,
+                overwrite_registry=args.overwrite_registry,
+                min_imported=args.min_imported,
+                max_quarantined=args.max_quarantined,
+                seed_policy=SeedLibraryPolicy(
+                    min_train_eligible=args.min_train_eligible,
+                    required_task_families=args.require_task_family,
+                    required_verifier_types=args.require_verifier_type,
+                    max_task_family_share=args.max_task_family_share,
+                    max_source_method_share=args.max_source_method_share,
+                    max_repository_share=args.max_repository_share,
+                    max_language_share=args.max_language_share,
+                ),
+                benchmark_sources=benchmark_sources,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
         registry = ScenarioRegistry(args.root)
         if args.registry_command == "list":
             print(json.dumps(registry.list_scenarios(), indent=2))

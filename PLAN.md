@@ -433,6 +433,9 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   audit outputs before registry import.
 - [x] Validate a small public issue/PR registry import rehearsal and harden task-family inference
   against noisy PR body checklist terms.
+- [x] Add a reusable registry import rehearsal gate that imports audited sources into a temporary
+  registry, applies repository allowlists, runs registry validation, and enforces seed-audit policy
+  before materialization.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -481,6 +484,10 @@ Current checkpoint:
 - A small registry import rehearsal with the currently collected PR records passes registry
   validation and seed-audit family/verifier consistency after filtering noisy PR checklist terms
   out of task-family inference.
+- `registry import-rehearsal` now makes that probe repeatable by creating a temporary registry from
+  audited source JSONL, applying the repository allowlist, running registry validation, enforcing
+  seed-audit policy, and returning a blocking exit code when import, quarantine, or coverage gates
+  fail.
 - The latest anonymous GitHub API collection attempt covered all 30 planned tasks and processed
   all 20 supported issue/PR tasks, but every issue/PR request hit HTTP 403 rate limits. The current
   source collection remains a probe with 2 accepted PR records, no accepted issue records, and no
@@ -693,3 +700,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Expanded the P7 production seed-corpus plan with milestone-level inputs, actions, outputs, and exit gates. |
 | 2026-07-03 | Added a source collection readiness gate before production seed-corpus registry import. |
 | 2026-07-03 | Verified a small public issue/PR registry import rehearsal and fixed noisy PR checklist task-family inference. |
+| 2026-07-03 | Added a reusable registry import rehearsal gate for audited public source records. |
