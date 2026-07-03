@@ -84,6 +84,8 @@ The first production-capable release must:
   coverage gates, repository-share readiness, and collection-plan validation
 - [x] Public issue/PR source export command that turns a collection plan into auditable JSONL
   records
+- [x] Resumable, shardable public issue/PR source export with partial-success summaries for
+  rate-limited collection
 - [x] Registry-backed smoke rollout coverage for every supported task family in
   `tests/test_seed_library_rollouts.py`
 
@@ -425,6 +427,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Build a repository allowlist from permissively licensed, active public repositories with
   reproducible Git history, stable test commands, and no benchmark overlap.
 - [x] Add an automated public issue/PR export path from collection plans to auditable source JSONL.
+- [x] Add resume, task sharding, sleep throttling, and partial-success summaries for public
+  issue/PR export runs.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -465,8 +469,10 @@ Current checkpoint:
 - `registry collection-export` now turns issue and pull-request collection-plan tasks into
   normalized public source JSONL. It supports fixture-backed tests and GitHub API collection, while
   CI collection tasks remain planned but skipped until a CI-specific record contract is added.
-- The next executable gate is to run `collection-export` against the production collection plan,
-  then run `collection-audit` before registry import.
+- `collection-export` supports task offsets, max-task shards, sleep throttling, resume without
+  duplicate source-instance IDs, summary files, and partial-success mode for API rate limits.
+- The next executable gate is to run all production issue/PR shards with `collection-export`, then
+  run `collection-audit` before registry import.
 
 1. **Corpus budget and source policy**
    - Define the initial scale target, minimum count per supported task family, required verifier

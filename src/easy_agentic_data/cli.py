@@ -299,6 +299,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_export_parser.add_argument("--plan", required=True)
     collection_export_parser.add_argument("--output", required=True)
     collection_export_parser.add_argument("--limit-per-task", type=int, default=10)
+    collection_export_parser.add_argument("--task-offset", type=int, default=0)
+    collection_export_parser.add_argument("--max-tasks", type=int)
+    collection_export_parser.add_argument("--sleep-seconds", type=float, default=0.0)
+    collection_export_parser.add_argument("--resume", action="store_true")
+    collection_export_parser.add_argument("--allow-partial", action="store_true")
+    collection_export_parser.add_argument("--summary-output", default="")
     collection_export_parser.add_argument("--fixture-root", default="")
     collection_export_parser.add_argument("--github-token-env", default="")
     collection_export_parser.add_argument("--timeout-seconds", type=float, default=30.0)
@@ -637,11 +643,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 plan,
                 output_path=args.output,
                 limit_per_task=args.limit_per_task,
+                task_offset=args.task_offset,
+                max_tasks=args.max_tasks,
+                sleep_seconds=args.sleep_seconds,
+                resume=args.resume,
+                allow_partial=args.allow_partial,
                 fixture_root=args.fixture_root or None,
                 github_token_env=args.github_token_env,
                 timeout_seconds=args.timeout_seconds,
             )
             payload = summary.to_dict()
+            if args.summary_output:
+                Path(args.summary_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.summary_output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if summary.valid else 2
         if args.registry_command == "collection-audit":

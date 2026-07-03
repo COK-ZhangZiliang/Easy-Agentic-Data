@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -74,9 +75,15 @@ class SourceExportSummary:
     """Summary of public source records exported from a collection plan."""
 
     plan_tasks: int = 0
+    selected_tasks: int = 0
+    processed_tasks: int = 0
     exported: int = 0
+    new_records: int = 0
+    existing_records: int = 0
+    duplicate_records: int = 0
     skipped_tasks: int = 0
     skipped_records: int = 0
+    allow_partial: bool = False
     output_path: str = ""
     source_type_counts: dict[str, int] = field(default_factory=dict)
     repository_counts: dict[str, int] = field(default_factory=dict)
@@ -84,7 +91,7 @@ class SourceExportSummary:
 
     @property
     def valid(self) -> bool:
-        return self.exported > 0 and not self.issues
+        return self.exported > 0 and (self.allow_partial or not self.issues)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -152,6 +159,11 @@ def export_public_source_records(
     *,
     output_path: str | Path,
     limit_per_task: int = 10,
+    task_offset: int = 0,
+    max_tasks: int | None = None,
+    sleep_seconds: float = 0.0,
+    resume: bool = False,
+    allow_partial: bool = False,
     fixture_root: str | Path | None = None,
     github_token_env: str = "",
     timeout_seconds: float = 30.0,
@@ -160,6 +172,7 @@ def export_public_source_records(
 
     tasks = list(collection_plan.get("tasks", []))
     output = Path(output_path)
+    selected_tasks = _selected_tasks(tasks, task_offset=task_offset, max_tasks=max_tasks)
     client: _SourceClient
     if fixture_root:
         client = _FixtureSourceClient(Path(fixture_root))
@@ -168,18 +181,27 @@ def export_public_source_records(
             token=os.environ.get(github_token_env, "") if github_token_env else "",
             timeout_seconds=timeout_seconds,
         )
-    records: list[dict[str, Any]] = []
+    records = _existing_export_records(output) if resume else []
+    seen_instance_ids = {_source_instance_id(record) for record in records}
     issues: list[str] = []
     source_type_counts: Counter[str] = Counter()
     repository_counts: Counter[str] = Counter()
+    for record in records:
+        source_type_counts[_source_type(record)] += 1
+        repository_counts[_repository(record)] += 1
+    existing_records = len(records)
+    new_records = 0
+    duplicate_records = 0
     skipped_tasks = 0
     skipped_records = 0
+    processed_tasks = 0
 
-    for task in tasks:
+    for task_index, task in enumerate(selected_tasks):
         collection_source = _normalize_label(task.get("collection_source"))
         if collection_source not in {"issues", "pull_requests"}:
             skipped_tasks += 1
             continue
+        processed_tasks += 1
         try:
             exported, skipped = _export_task_records(
                 task,
@@ -188,12 +210,20 @@ def export_public_source_records(
             )
         except Exception as exc:
             issues.append(f"{task.get('task_id', '<unknown>')}: {exc}")
+            _sleep_between_tasks(task_index, selected_tasks, sleep_seconds)
             continue
         skipped_records += skipped
-        records.extend(exported)
         for record in exported:
+            instance_id = _source_instance_id(record)
+            if instance_id in seen_instance_ids:
+                duplicate_records += 1
+                continue
+            seen_instance_ids.add(instance_id)
+            records.append(record)
+            new_records += 1
             source_type_counts[_source_type(record)] += 1
             repository_counts[_repository(record)] += 1
+        _sleep_between_tasks(task_index, selected_tasks, sleep_seconds)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
@@ -201,14 +231,57 @@ def export_public_source_records(
             handle.write(json.dumps(record, sort_keys=True) + "\n")
     return SourceExportSummary(
         plan_tasks=len(tasks),
+        selected_tasks=len(selected_tasks),
+        processed_tasks=processed_tasks,
         exported=len(records),
+        new_records=new_records,
+        existing_records=existing_records,
+        duplicate_records=duplicate_records,
         skipped_tasks=skipped_tasks,
         skipped_records=skipped_records,
+        allow_partial=allow_partial,
         output_path=str(output),
         source_type_counts=dict(sorted(source_type_counts.items())),
         repository_counts=dict(sorted(repository_counts.items())),
         issues=issues,
     )
+
+
+def _selected_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    task_offset: int,
+    max_tasks: int | None,
+) -> list[dict[str, Any]]:
+    start = max(0, task_offset)
+    selected = tasks[start:]
+    if max_tasks is not None:
+        selected = selected[: max(0, max_tasks)]
+    return selected
+
+
+def _existing_export_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        payload = json.loads(stripped)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Existing export line {line_number} must contain an object")
+        records.append(payload)
+    return records
+
+
+def _sleep_between_tasks(
+    task_index: int,
+    selected_tasks: list[dict[str, Any]],
+    sleep_seconds: float,
+) -> None:
+    if sleep_seconds > 0 and task_index < len(selected_tasks) - 1:
+        time.sleep(sleep_seconds)
 
 
 def audit_public_source_records(

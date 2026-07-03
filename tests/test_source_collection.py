@@ -233,6 +233,119 @@ class SourceCollectionTests(unittest.TestCase):
             )
             self.assertTrue(all(record["candidate_verifier"] for record in exported_records))
 
+    def test_cli_collection_export_resumes_without_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowlist = root / "allowlist.json"
+            plan_output = root / "plan.json"
+            export_output = root / "exports.jsonl"
+            summary_output = root / "summary.json"
+            _write_fixture_source(root / "fixtures", include_pull_requests=True)
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+            existing_record = {
+                **_source_record(),
+                "id": "example__tool-issue-100",
+                "source_instance_id": "example__tool-issue-100",
+            }
+            export_output.write_text(json.dumps(existing_record) + "\n", encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "registry",
+                        "collection-plan",
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(plan_output),
+                    ]
+                )
+            with redirect_stdout(io.StringIO()):
+                export_exit_code = main(
+                    [
+                        "registry",
+                        "collection-export",
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(export_output),
+                        "--fixture-root",
+                        str(root / "fixtures"),
+                        "--limit-per-task",
+                        "1",
+                        "--resume",
+                        "--summary-output",
+                        str(summary_output),
+                    ]
+                )
+
+            records = [
+                json.loads(line) for line in export_output.read_text(encoding="utf-8").splitlines()
+            ]
+            summary = json.loads(summary_output.read_text(encoding="utf-8"))
+            self.assertEqual(export_exit_code, 0)
+            self.assertEqual(len(records), 2)
+            self.assertEqual(summary["existing_records"], 1)
+            self.assertEqual(summary["new_records"], 1)
+            self.assertEqual(summary["duplicate_records"], 1)
+            self.assertEqual(summary["exported"], 2)
+
+    def test_cli_collection_export_allows_partial_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowlist = root / "allowlist.json"
+            plan_output = root / "plan.json"
+            export_output = root / "exports.jsonl"
+            _write_fixture_source(root / "fixtures", include_pull_requests=False)
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "registry",
+                        "collection-plan",
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(plan_output),
+                    ]
+                )
+            export_stdout = io.StringIO()
+            with redirect_stdout(export_stdout):
+                export_exit_code = main(
+                    [
+                        "registry",
+                        "collection-export",
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(export_output),
+                        "--fixture-root",
+                        str(root / "fixtures"),
+                        "--limit-per-task",
+                        "1",
+                        "--allow-partial",
+                    ]
+                )
+
+            summary = json.loads(export_stdout.getvalue())
+            records = [
+                json.loads(line) for line in export_output.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(export_exit_code, 0)
+            self.assertEqual(len(records), 1)
+            self.assertTrue(summary["valid"])
+            self.assertTrue(summary["allow_partial"])
+            self.assertEqual(summary["exported"], 1)
+            self.assertEqual(summary["new_records"], 1)
+            self.assertEqual(len(summary["issues"]), 1)
+
 
 def _allowlist_record() -> dict[str, object]:
     return {
@@ -245,6 +358,49 @@ def _allowlist_record() -> dict[str, object]:
         "pr_labels": ["review"],
         "test_commands": ["python -m pytest tests/test_parser.py"],
     }
+
+
+def _write_fixture_source(root: Path, *, include_pull_requests: bool) -> None:
+    fixture_repo = root / "example__tool"
+    (fixture_repo / "branches").mkdir(parents=True)
+    (fixture_repo / "repository.json").write_text(
+        json.dumps({"default_branch": "main"}),
+        encoding="utf-8",
+    )
+    (fixture_repo / "branches" / "main.json").write_text(
+        json.dumps({"commit": {"sha": "a" * 40}}),
+        encoding="utf-8",
+    )
+    (fixture_repo / "issues.json").write_text(
+        json.dumps(
+            [
+                {
+                    "number": 100,
+                    "html_url": "https://github.com/example/tool/issues/100",
+                    "title": "Fix parser whitespace handling",
+                    "body": "The parser drops significant whitespace.",
+                    "labels": [{"name": "bug"}, {"name": "parser"}],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    if include_pull_requests:
+        (fixture_repo / "pull_requests.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "number": 101,
+                        "html_url": "https://github.com/example/tool/pull/101",
+                        "title": "Add parser regression coverage",
+                        "body": "This PR adds tests for quoted whitespace.",
+                        "labels": [{"name": "review"}],
+                        "base": {"sha": "b" * 40},
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
 
 
 def _source_record() -> dict[str, object]:
