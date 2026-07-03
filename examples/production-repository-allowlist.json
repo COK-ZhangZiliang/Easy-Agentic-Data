@@ -87,6 +87,86 @@
         "https://github.com/pytest-dev/pluggy"
       ],
       "notes": "Public Python plugin-system library with MIT license. Resolve exact base commits per exported record."
+    },
+    {
+      "repository": "python-attrs/attrs",
+      "source_uri": "https://github.com/python-attrs/attrs.git",
+      "license": "MIT",
+      "language": "Python",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "feature"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["python -m pytest tests"],
+      "ci_commands": ["python -m pytest tests"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/python-attrs/attrs"
+      ],
+      "notes": "Public Python classes library with MIT license, tests directory, and active issues/PRs. Resolve exact base commits per exported record."
+    },
+    {
+      "repository": "python-jsonschema/jsonschema",
+      "source_uri": "https://github.com/python-jsonschema/jsonschema.git",
+      "license": "MIT",
+      "language": "Python",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "feature"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["python -m pytest"],
+      "ci_commands": ["python -m pytest"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/python-jsonschema/jsonschema"
+      ],
+      "notes": "Public Python JSON Schema implementation with MIT license and active project metadata. Resolve exact base commits per exported record."
+    },
+    {
+      "repository": "textualize/rich",
+      "source_uri": "https://github.com/Textualize/rich.git",
+      "license": "MIT",
+      "language": "Python",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "enhancement"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["python -m pytest tests"],
+      "ci_commands": ["python -m pytest tests"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/Textualize/rich"
+      ],
+      "notes": "Public Python terminal-formatting library with MIT license and active issues/PRs. Resolve exact base commits per exported record."
+    },
+    {
+      "repository": "agronholm/anyio",
+      "source_uri": "https://github.com/agronholm/anyio.git",
+      "license": "MIT",
+      "language": "Python",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "enhancement"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["python -m pytest tests"],
+      "ci_commands": ["python -m pytest tests"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/agronholm/anyio"
+      ],
+      "notes": "Public Python async concurrency library with MIT license, tests directory, and active issues/PRs. Resolve exact base commits per exported record."
+    },
+    {
+      "repository": "fastapi/fastapi",
+      "source_uri": "https://github.com/fastapi/fastapi.git",
+      "license": "MIT",
+      "language": "Python",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "docs", "feature"],
+      "pr_labels": ["bug", "docs", "tests"],
+      "test_commands": ["python -m pytest tests"],
+      "ci_commands": ["python -m pytest tests"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/fastapi/fastapi"
+      ],
+      "notes": "Public Python web framework with MIT license, tests directory, and active PR flow. Resolve exact base commits per exported record."
     }
   ]
 }

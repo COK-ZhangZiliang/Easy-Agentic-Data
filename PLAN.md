@@ -80,8 +80,8 @@ The first production-capable release must:
 - [x] Repository allowlist audit and seed-corpus allowlist enforcement for train-source quarantine
 - [x] Source collection plan and local export audit for public issue/PR records before registry
   import
-- [x] First production seed-corpus policy and repository allowlist candidate files with static
-  coverage gates and collection-plan validation
+- [x] First production seed-corpus policy and 10-repository allowlist candidate files with static
+  coverage gates, repository-share readiness, and collection-plan validation
 - [x] Registry-backed smoke rollout coverage for every supported task family in
   `tests/test_seed_library_rollouts.py`
 
@@ -420,7 +420,7 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 
 - [x] Define the first production seed-corpus target size, per-family minimum counts, per-language
   targets, and maximum repository/source shares before collecting data.
-- [ ] Build a repository allowlist from permissively licensed, active public repositories with
+- [x] Build a repository allowlist from permissively licensed, active public repositories with
   reproducible Git history, stable test commands, and no benchmark overlap.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
@@ -453,12 +453,12 @@ Current checkpoint:
   seeds, all supported task families, required verifier types, per-family minimums, source-method
   minimums, an 80% maximum language share, a 25% maximum family share, a 65% maximum source-method
   share, and a 10% maximum repository share.
-- `examples/production-repository-allowlist.json` records the first five public Python repository
+- `examples/production-repository-allowlist.json` records the first ten public Python repository
   candidates with permissive licenses, public Git source URIs, collection sources, labels, stable
   commands, and source-evidence URLs.
-- This checkpoint is not production approval. Five repositories cannot satisfy the 10% repository
-  share cap for a 1,000-seed corpus, exported public records have not yet been collected, and
-  `scale_decision.approved` remains false.
+- This checkpoint is not production approval. Ten repositories satisfy the first repository-share
+  threshold for a 1,000-seed corpus, but the allowlist is still Python-only, exported public records
+  have not yet been collected, and `scale_decision.approved` remains false.
 - The next executable gate is to run allowlist audit and collection-plan generation for the
   candidate allowlist, then collect real public source exports before registry import.
 

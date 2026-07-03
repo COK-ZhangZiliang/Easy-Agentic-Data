@@ -227,11 +227,13 @@ pilot or shard selection:
 The checked-in production starting point is
 `examples/production-seed-corpus-policy.json` plus
 `examples/production-repository-allowlist.json`. These files define the first 1,000-seed target,
-coverage gates, review and pilot phases, and five verified public Python repository candidates.
+coverage gates, review and pilot phases, and ten verified public Python repository candidates.
 They are intentionally not a scale approval: the policy keeps `scale_decision.approved=false`
 until real source exports, registry materialization, decontamination audits, human review, and a
-pilot rollout pass. The demo commands below use toy sources that run locally; for the production
-candidate allowlist, start with:
+pilot rollout pass. The allowlist now satisfies the 10% maximum repository-share threshold for a
+1,000-seed corpus, but it remains Python-only, so the language-share gate still requires later
+cross-language or non-Python source expansion before scale-up. The demo commands below use toy
+sources that run locally; for the production candidate allowlist, start with:
 
 ```bash
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \

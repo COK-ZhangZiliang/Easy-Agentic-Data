@@ -67,11 +67,11 @@
     "max_quarantined_records": 200
   },
   "current_candidate_status": {
-    "repository_candidates": 5,
+    "repository_candidates": 10,
     "minimum_repositories_required_by_share_cap": 10,
     "approved_for_scale": false,
     "remaining_requirements": [
-      "Expand the repository allowlist beyond the 10% maximum repository-share gate.",
+      "Add non-Python or cross-language sources before applying the 80% maximum language-share gate to the full corpus.",
       "Collect and audit public issue, PR, CI, review, and release-migration records from fixed commits.",
       "Generate repository-grounded synthetic backfill only for under-covered families and verifier types.",
       "Materialize train and holdout registries, then run seed and scenario decontamination audits.",

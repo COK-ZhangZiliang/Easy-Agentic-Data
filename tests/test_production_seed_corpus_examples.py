@@ -20,17 +20,17 @@ class ProductionSeedCorpusExampleTests(unittest.TestCase):
 
         audit = audit_repository_allowlist(records)
         self.assertTrue(audit.valid, [issue.code for issue in audit.issues])
-        self.assertEqual(audit.total, 5)
-        self.assertEqual(audit.approved, 5)
+        self.assertEqual(audit.total, 10)
+        self.assertEqual(audit.approved, 10)
         self.assertEqual(audit.blocked, 0)
         self.assertEqual(
             audit.license_counts,
-            {"apache_2.0": 1, "bsd_3_clause": 2, "mit": 2},
+            {"apache_2.0": 1, "bsd_3_clause": 2, "mit": 7},
         )
-        self.assertEqual(audit.language_counts, {"python": 5})
+        self.assertEqual(audit.language_counts, {"python": 10})
         self.assertEqual(
             audit.collection_source_counts,
-            {"ci": 5, "issues": 5, "pull_requests": 5},
+            {"ci": 10, "issues": 10, "pull_requests": 10},
         )
 
         plan = build_source_collection_plan(
@@ -39,7 +39,7 @@ class ProductionSeedCorpusExampleTests(unittest.TestCase):
             source_name="production-public-python-sources",
         )
         self.assertTrue(plan["valid"], plan["allowlist_audit"]["issues"])
-        self.assertEqual(plan["total_tasks"], 15)
+        self.assertEqual(plan["total_tasks"], 30)
         self.assertEqual(
             {task["collection_source"] for task in plan["tasks"]},
             {"ci", "issues", "pull_requests"},
@@ -71,10 +71,10 @@ class ProductionSeedCorpusExampleTests(unittest.TestCase):
         )
         self.assertLessEqual(sum(coverage["min_task_family_counts"].values()), target)
         self.assertGreaterEqual(coverage["min_language_counts"]["python"], 700)
-        self.assertEqual(candidate_status["repository_candidates"], 5)
-        self.assertGreater(
-            candidate_status["minimum_repositories_required_by_share_cap"],
+        self.assertEqual(candidate_status["repository_candidates"], 10)
+        self.assertGreaterEqual(
             candidate_status["repository_candidates"],
+            candidate_status["minimum_repositories_required_by_share_cap"],
         )
         self.assertTrue(policy["review"]["required"])
         self.assertFalse(policy["scale_decision"]["approved"])
