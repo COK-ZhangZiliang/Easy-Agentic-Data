@@ -99,6 +99,49 @@ class SourceExportSummary:
         return value
 
 
+@dataclass
+class SourceCollectionReadiness:
+    """Readiness gate for exported public source records before registry import."""
+
+    plan_tasks: int = 0
+    supported_plan_tasks: int = 0
+    selected_tasks: int = 0
+    processed_tasks: int = 0
+    skipped_tasks: int = 0
+    skipped_records: int = 0
+    exported_records: int = 0
+    accepted_records: int = 0
+    quarantined_records: int = 0
+    duplicate_records: int = 0
+    min_accepted: int = 1
+    max_quarantined: int = 0
+    require_clean_export: bool = False
+    require_all_plan_tasks: bool = False
+    plan_valid: bool = False
+    export_valid: bool = False
+    audit_valid: bool = False
+    required_source_types: list[str] = field(default_factory=list)
+    present_source_types: dict[str, int] = field(default_factory=dict)
+    repository_counts: dict[str, int] = field(default_factory=dict)
+    export_issue_count: int = 0
+    audit_issue_count: int = 0
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
+
+    @property
+    def ready_for_import(self) -> bool:
+        return self.valid
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        value["ready_for_import"] = self.ready_for_import
+        return value
+
+
 def build_source_collection_plan(
     allowlist_records: Iterable[dict[str, Any]],
     *,
@@ -243,6 +286,196 @@ def export_public_source_records(
         output_path=str(output),
         source_type_counts=dict(sorted(source_type_counts.items())),
         repository_counts=dict(sorted(repository_counts.items())),
+        issues=issues,
+    )
+
+
+def summarize_source_collection_readiness(
+    collection_plan: dict[str, Any],
+    export_summary: dict[str, Any],
+    collection_audit: dict[str, Any],
+    *,
+    min_accepted: int = 1,
+    max_quarantined: int = 0,
+    require_clean_export: bool = False,
+    require_all_plan_tasks: bool = False,
+    required_source_types: Iterable[str] = (),
+) -> SourceCollectionReadiness:
+    """Combine source collection artifacts into a registry-import readiness gate."""
+
+    tasks = list(collection_plan.get("tasks", []))
+    plan_tasks = _int_field(collection_plan.get("total_tasks"), default=len(tasks))
+    if not plan_tasks:
+        plan_tasks = len(tasks)
+    supported_plan_tasks = sum(
+        1
+        for task in tasks
+        if _normalize_label(task.get("collection_source")) in {"issues", "pull_requests"}
+    )
+    selected_tasks = _int_field(export_summary.get("selected_tasks"))
+    processed_tasks = _int_field(export_summary.get("processed_tasks"))
+    skipped_tasks = _int_field(export_summary.get("skipped_tasks"))
+    skipped_records = _int_field(export_summary.get("skipped_records"))
+    exported_records = _int_field(export_summary.get("exported"))
+    duplicate_records = _int_field(export_summary.get("duplicate_records"))
+    accepted_records = _int_field(collection_audit.get("accepted"))
+    quarantined_records = _int_field(collection_audit.get("quarantined"))
+    audit_total = _int_field(collection_audit.get("total"))
+    export_issues = _string_list(export_summary.get("issues"))
+    raw_audit_issues = collection_audit.get("issues")
+    audit_issues = raw_audit_issues if isinstance(raw_audit_issues, list) else []
+    required_types = sorted(
+        {
+            _readiness_source_type(source_type)
+            for source_type in required_source_types
+            if _readiness_source_type(source_type)
+        }
+    )
+    present_source_types = _source_type_counts(collection_audit.get("source_type_counts"))
+    repository_counts = _string_int_mapping(collection_audit.get("repository_counts"))
+    issues: list[SourceCollectionIssue] = []
+    plan_valid = bool(collection_plan.get("valid"))
+    export_valid = bool(export_summary.get("valid"))
+    audit_valid = bool(collection_audit.get("valid"))
+
+    if not plan_valid:
+        issues.append(
+            SourceCollectionIssue(
+                code="source_collection_plan_invalid",
+                message="Collection plan is not valid",
+            )
+        )
+    if plan_tasks <= 0:
+        issues.append(
+            SourceCollectionIssue(
+                code="missing_collection_plan_tasks",
+                message="Collection plan does not contain any tasks",
+            )
+        )
+    if supported_plan_tasks <= 0:
+        issues.append(
+            SourceCollectionIssue(
+                code="missing_supported_collection_tasks",
+                message="Collection plan does not contain issue or pull-request tasks",
+            )
+        )
+    if not export_valid:
+        issues.append(
+            SourceCollectionIssue(
+                code="source_export_summary_invalid",
+                message="Source export summary is not valid",
+            )
+        )
+    if not audit_valid:
+        issues.append(
+            SourceCollectionIssue(
+                code="source_collection_audit_failed",
+                message="Source collection audit contains blocking issues",
+            )
+        )
+    if accepted_records < max(0, min_accepted):
+        issues.append(
+            SourceCollectionIssue(
+                code="accepted_records_below_minimum",
+                message=(
+                    "Accepted source records are below the configured minimum "
+                    f"({accepted_records} < {max(0, min_accepted)})"
+                ),
+            )
+        )
+    if quarantined_records > max(0, max_quarantined):
+        issues.append(
+            SourceCollectionIssue(
+                code="quarantine_budget_exceeded",
+                message=(
+                    "Quarantined source records exceed the configured budget "
+                    f"({quarantined_records} > {max(0, max_quarantined)})"
+                ),
+            )
+        )
+    if exported_records != audit_total:
+        issues.append(
+            SourceCollectionIssue(
+                code="audit_export_count_mismatch",
+                message=(
+                    "Collection audit total does not match exported record count "
+                    f"({audit_total} != {exported_records})"
+                ),
+            )
+        )
+    export_plan_tasks = _int_field(export_summary.get("plan_tasks"))
+    if export_plan_tasks and plan_tasks and export_plan_tasks != plan_tasks:
+        issues.append(
+            SourceCollectionIssue(
+                code="plan_export_task_count_mismatch",
+                message=(
+                    "Collection plan task count does not match export summary "
+                    f"({plan_tasks} != {export_plan_tasks})"
+                ),
+            )
+        )
+    if require_all_plan_tasks and selected_tasks < plan_tasks:
+        issues.append(
+            SourceCollectionIssue(
+                code="partial_plan_selection",
+                message=(
+                    "Export summary does not cover all collection-plan tasks "
+                    f"({selected_tasks} < {plan_tasks})"
+                ),
+            )
+        )
+    for source_type in required_types:
+        if present_source_types.get(source_type, 0) <= 0:
+            issues.append(
+                SourceCollectionIssue(
+                    code="missing_required_source_type",
+                    message=f"Required source type is absent from accepted records: {source_type}",
+                )
+            )
+    if export_issues:
+        issues.append(
+            SourceCollectionIssue(
+                code="source_export_issues",
+                message=(
+                    "Source export summary contains unresolved collection issues"
+                    if require_clean_export
+                    else "Source export summary contains partial collection issues"
+                ),
+                severity="error" if require_clean_export else "warning",
+            )
+        )
+    if skipped_tasks:
+        issues.append(
+            SourceCollectionIssue(
+                code="skipped_collection_tasks",
+                message=f"Source export skipped {skipped_tasks} collection tasks",
+                severity="warning",
+            )
+        )
+
+    return SourceCollectionReadiness(
+        plan_tasks=plan_tasks,
+        supported_plan_tasks=supported_plan_tasks,
+        selected_tasks=selected_tasks,
+        processed_tasks=processed_tasks,
+        skipped_tasks=skipped_tasks,
+        skipped_records=skipped_records,
+        exported_records=exported_records,
+        accepted_records=accepted_records,
+        quarantined_records=quarantined_records,
+        duplicate_records=duplicate_records,
+        min_accepted=max(0, min_accepted),
+        max_quarantined=max(0, max_quarantined),
+        require_clean_export=require_clean_export,
+        require_all_plan_tasks=require_all_plan_tasks,
+        plan_valid=plan_valid,
+        export_valid=export_valid,
+        audit_valid=audit_valid,
+        required_source_types=required_types,
+        present_source_types=present_source_types,
+        repository_counts=repository_counts,
+        export_issue_count=len(export_issues),
+        audit_issue_count=len(audit_issues),
         issues=issues,
     )
 
@@ -765,6 +998,26 @@ def _source_type(record: dict[str, Any]) -> str:
     return "public_issue"
 
 
+def _readiness_source_type(value: Any) -> str:
+    normalized = _normalize_label(value)
+    if normalized in {"issue", "issues", "public_issue"}:
+        return "public_issue"
+    if normalized in {"pr", "prs", "pull_request", "pull_requests", "public_pr"}:
+        return "public_pr"
+    return normalized
+
+
+def _source_type_counts(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    counts: Counter[str] = Counter()
+    for key, count in value.items():
+        source_type = _readiness_source_type(key)
+        if source_type:
+            counts[source_type] += _int_field(count)
+    return dict(sorted(counts.items()))
+
+
 def _source_url(record: dict[str, Any]) -> str:
     return _text(
         record.get("source_url")
@@ -839,6 +1092,25 @@ def _list_field(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item)]
     return []
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item)]
+
+
+def _string_int_mapping(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): _int_field(count) for key, count in sorted(value.items())}
+
+
+def _int_field(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _text(value: Any) -> str:

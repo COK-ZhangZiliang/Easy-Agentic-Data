@@ -72,7 +72,7 @@
     "approved_for_scale": false,
     "remaining_requirements": [
       "Add non-Python or cross-language sources before applying the 80% maximum language-share gate to the full corpus.",
-      "Run resumable collection-export shards and collection-audit for public issue and PR records from fixed commits.",
+      "Run resumable collection-export shards, collection-audit, and collection-readiness for public issue and PR records from fixed commits.",
       "Add a CI-specific record contract before using CI collection tasks as trainable source records.",
       "Generate repository-grounded synthetic backfill only for under-covered families and verifier types.",
       "Materialize train and holdout registries, then run seed and scenario decontamination audits.",
@@ -86,7 +86,7 @@
     },
     {
       "phase": "source_collection",
-      "exit_gate": "All exported public records pass collection audit, allowlist filtering, fixed-revision checks, and quarantine budgets."
+      "exit_gate": "All exported public records pass collection audit, allowlist filtering, fixed-revision checks, quarantine budgets, source-type requirements, and collection-readiness thresholds."
     },
     {
       "phase": "registry_materialization",

@@ -429,6 +429,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add an automated public issue/PR export path from collection plans to auditable source JSONL.
 - [x] Add resume, task sharding, sleep throttling, and partial-success summaries for public
   issue/PR export runs.
+- [x] Add a source collection readiness gate that combines collection plans, export summaries, and
+  audit outputs before registry import.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -471,8 +473,11 @@ Current checkpoint:
   CI collection tasks remain planned but skipped until a CI-specific record contract is added.
 - `collection-export` supports task offsets, max-task shards, sleep throttling, resume without
   duplicate source-instance IDs, summary files, and partial-success mode for API rate limits.
-- The next executable gate is to run all production issue/PR shards with `collection-export`, then
-  run `collection-audit` before registry import.
+- `registry collection-readiness` now combines the collection plan, export summary, and collection
+  audit into a registry-import gate with accepted-record, quarantine, source-type, clean-export,
+  and full-plan coverage thresholds.
+- The next data gate is to run all production issue/PR shards with `collection-export`, then run
+  `collection-audit` and `collection-readiness` before registry import.
 
 Next milestone plan:
 
@@ -677,3 +682,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-01 | Wired trace-logic audit metrics into scale candidate selection and prepared an audit-strict DeepSeek V4 Pro scale queue. |
 | 2026-07-01 | Added a scale-readiness summary CLI to combine candidate selection, cost estimate, shard status, trace audit, and continuation gates. |
 | 2026-07-03 | Expanded the P7 production seed-corpus plan with milestone-level inputs, actions, outputs, and exit gates. |
+| 2026-07-03 | Added a source collection readiness gate before production seed-corpus registry import. |

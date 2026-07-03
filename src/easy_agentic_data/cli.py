@@ -87,6 +87,7 @@ from easy_agentic_data.source_collection import (
     audit_public_source_records,
     build_source_collection_plan,
     export_public_source_records,
+    summarize_source_collection_readiness,
 )
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
@@ -313,6 +314,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_audit_parser.add_argument("--allowlist", required=True)
     collection_audit_parser.add_argument("--output", default="")
     collection_audit_parser.add_argument("--source-name", default="curated-public-sources")
+    collection_readiness_parser = registry_subparsers.add_parser("collection-readiness")
+    collection_readiness_parser.add_argument("--plan", required=True)
+    collection_readiness_parser.add_argument("--export-summary", required=True)
+    collection_readiness_parser.add_argument("--audit", required=True)
+    collection_readiness_parser.add_argument("--output", default="")
+    collection_readiness_parser.add_argument("--min-accepted", type=int, default=1)
+    collection_readiness_parser.add_argument("--max-quarantined", type=int, default=0)
+    collection_readiness_parser.add_argument("--require-source-type", action="append", default=[])
+    collection_readiness_parser.add_argument("--require-clean-export", action="store_true")
+    collection_readiness_parser.add_argument("--require-all-plan-tasks", action="store_true")
     inspect_parser = registry_subparsers.add_parser("inspect")
     inspect_parser.add_argument("--root", required=True)
     inspect_parser.add_argument("--scenario-id", required=True)
@@ -676,6 +687,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if audit.valid else 2
+        if args.registry_command == "collection-readiness":
+            readiness = summarize_source_collection_readiness(
+                json.loads(Path(args.plan).read_text(encoding="utf-8")),
+                json.loads(Path(args.export_summary).read_text(encoding="utf-8")),
+                json.loads(Path(args.audit).read_text(encoding="utf-8")),
+                min_accepted=args.min_accepted,
+                max_quarantined=args.max_quarantined,
+                require_clean_export=args.require_clean_export,
+                require_all_plan_tasks=args.require_all_plan_tasks,
+                required_source_types=args.require_source_type,
+            )
+            payload = readiness.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if readiness.ready_for_import else 2
         registry = ScenarioRegistry(args.root)
         if args.registry_command == "list":
             print(json.dumps(registry.list_scenarios(), indent=2))

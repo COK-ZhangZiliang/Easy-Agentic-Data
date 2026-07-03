@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-163%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-165%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -258,6 +258,18 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
   --source runs/seed-corpus-demo/production-public-source-records.jsonl \
   --allowlist examples/production-repository-allowlist.json \
   --output runs/seed-corpus-demo/production-source-collection-audit.json
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
+  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
+  --export-summary runs/seed-corpus-demo/production-source-export-summary.json \
+  --audit runs/seed-corpus-demo/production-source-collection-audit.json \
+  --min-accepted 1000 \
+  --max-quarantined 0 \
+  --require-source-type public_issue \
+  --require-source-type public_pr \
+  --require-clean-export \
+  --require-all-plan-tasks \
+  --output runs/seed-corpus-demo/production-source-readiness.json
 ```
 
 `collection-export` reads the plan and writes normalized public issue/PR JSONL records. It can use
@@ -267,7 +279,10 @@ with `--github-token-env GITHUB_TOKEN` when rate limits require it. Use `--max-t
 duplicating source-instance IDs. `--allow-partial` is useful for rate-limited runs because valid
 records are still written and can be audited while failed tasks remain visible in the summary. CI
 collection tasks remain plan entries for now; the exporter skips them until a CI-specific record
-contract is added. Until real exported records exist, use the toy demo below to validate the
+contract is added. `collection-readiness` combines the collection plan, export summary, and audit
+output into the registry-import gate: small probes can lower `--min-accepted`, while production
+runs should require the policy target, both issue and PR records, clean export summaries, and full
+plan-task coverage. Until real exported records exist, use the toy demo below to validate the
 end-to-end local gate mechanics:
 
 ```bash

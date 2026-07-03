@@ -346,6 +346,156 @@ class SourceCollectionTests(unittest.TestCase):
             self.assertEqual(summary["new_records"], 1)
             self.assertEqual(len(summary["issues"]), 1)
 
+    def test_cli_collection_readiness_accepts_complete_source_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            summary_output = root / "summary.json"
+            audit_output = root / "audit.json"
+            readiness_output = root / "readiness.json"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            audit = audit_public_source_records(
+                [_source_record(), _pr_source_record()],
+                [_allowlist_record()],
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": True,
+                        "plan_tasks": 2,
+                        "selected_tasks": 2,
+                        "processed_tasks": 2,
+                        "exported": 2,
+                        "duplicate_records": 0,
+                        "skipped_tasks": 0,
+                        "skipped_records": 0,
+                        "source_type_counts": {"public_issue": 1, "public_pr": 1},
+                        "repository_counts": {"example/tool": 2},
+                        "issues": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            audit_output.write_text(json.dumps(audit.to_dict()), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-readiness",
+                        "--plan",
+                        str(plan_output),
+                        "--export-summary",
+                        str(summary_output),
+                        "--audit",
+                        str(audit_output),
+                        "--min-accepted",
+                        "2",
+                        "--max-quarantined",
+                        "0",
+                        "--require-source-type",
+                        "public_issue",
+                        "--require-source-type",
+                        "public_pr",
+                        "--require-clean-export",
+                        "--require-all-plan-tasks",
+                        "--output",
+                        str(readiness_output),
+                    ]
+                )
+
+            readiness = json.loads(readiness_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(readiness["ready_for_import"])
+            self.assertEqual(readiness["accepted_records"], 2)
+            self.assertEqual(readiness["present_source_types"], {"public_issue": 1, "public_pr": 1})
+            self.assertEqual(readiness["issues"], [])
+
+    def test_cli_collection_readiness_blocks_incomplete_source_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            summary_output = root / "summary.json"
+            audit_output = root / "audit.json"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            audit = audit_public_source_records(
+                [
+                    _source_record(),
+                    {
+                        **_source_record(),
+                        "id": "issue-101",
+                        "source_instance_id": "example__tool-issue-101",
+                        "body": "",
+                    },
+                ],
+                [_allowlist_record()],
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": True,
+                        "allow_partial": True,
+                        "plan_tasks": 2,
+                        "selected_tasks": 1,
+                        "processed_tasks": 1,
+                        "exported": 2,
+                        "duplicate_records": 0,
+                        "skipped_tasks": 0,
+                        "skipped_records": 0,
+                        "source_type_counts": {"public_issue": 2},
+                        "repository_counts": {"example/tool": 2},
+                        "issues": ["collection-task: rate limit"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            audit_output.write_text(json.dumps(audit.to_dict()), encoding="utf-8")
+
+            readiness_stdout = io.StringIO()
+            with redirect_stdout(readiness_stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-readiness",
+                        "--plan",
+                        str(plan_output),
+                        "--export-summary",
+                        str(summary_output),
+                        "--audit",
+                        str(audit_output),
+                        "--min-accepted",
+                        "2",
+                        "--max-quarantined",
+                        "0",
+                        "--require-source-type",
+                        "public_pr",
+                        "--require-clean-export",
+                        "--require-all-plan-tasks",
+                    ]
+                )
+
+            readiness = json.loads(readiness_stdout.getvalue())
+            codes = {issue["code"] for issue in readiness["issues"]}
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(readiness["ready_for_import"])
+            self.assertIn("accepted_records_below_minimum", codes)
+            self.assertIn("quarantine_budget_exceeded", codes)
+            self.assertIn("missing_required_source_type", codes)
+            self.assertIn("source_export_issues", codes)
+            self.assertIn("partial_plan_selection", codes)
+
 
 def _allowlist_record() -> dict[str, object]:
     return {
@@ -417,6 +567,20 @@ def _source_record() -> dict[str, object]:
         "license": "MIT",
         "language": "Python",
         "test_commands": ["python -m pytest tests/test_parser.py::test_whitespace"],
+    }
+
+
+def _pr_source_record() -> dict[str, object]:
+    return {
+        **_source_record(),
+        "id": "pr-101",
+        "type": "pull_request",
+        "source_revision": "b" * 40,
+        "source_instance_id": "example__tool-pr-101",
+        "source_url": "https://github.com/example/tool/pull/101",
+        "title": "Add parser regression coverage",
+        "body": "This PR adds tests for quoted whitespace.",
+        "labels": ["review"],
     }
 
 
