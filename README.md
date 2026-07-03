@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-187%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-188%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -354,8 +354,9 @@ create misleading rate-limit summaries. Use `--max-tasks`, `--task-offset`, `--r
 `--sleep-seconds` to shard and resume collection without duplicating source-instance IDs.
 `--allow-partial` is useful for rate-limited runs because valid records are still written and can
 be audited while failed tasks remain visible in the summary. Each new export summary includes
-per-task outcomes. `collection-retry-plan` turns failed, skipped, or not-yet-selected collection
-tasks into explicit retry shards with task IDs, repositories, source types, and
+per-task outcomes. `collection-retry-plan` turns failed, skipped, missing-outcome, or
+not-yet-selected collection tasks into explicit retry shards with task IDs, repositories, source
+types, and
 `--task-offset N --max-tasks 1` arguments. `collection-retry-run` consumes that retry plan and
 executes those single-task shards against the same source JSONL with resume enabled, so a
 rate-limited run can continue from machine-readable retry metadata instead of hand-copied

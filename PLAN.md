@@ -499,8 +499,8 @@ Current checkpoint:
 - `collection-export` supports task offsets, max-task shards, sleep throttling, resume without
   duplicate source-instance IDs, summary files, and partial-success mode for API rate limits.
 - New export summaries include per-task outcomes, and `registry collection-retry-plan` turns
-  failed, skipped, and unselected source-collection tasks into exact retry shards with task IDs,
-  repositories, source types, and `--task-offset N --max-tasks 1` arguments.
+  failed, skipped, missing-outcome, and unselected source-collection tasks into exact retry shards
+  with task IDs, repositories, source types, and `--task-offset N --max-tasks 1` arguments.
 - `registry collection-retry-run` can now consume those retry plans and execute selected retry
   tasks against the shared source JSONL with resume enabled, producing a retry-run summary for
   follow-up audit and readiness decisions.
@@ -534,6 +534,10 @@ Current checkpoint:
   after CI collection support. It added five PR records to the existing two-record probe, but 28
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
   with 7 accepted PR records, no accepted issue or CI records, and no production import approval.
+- The current authenticated collection preflight refreshed the production allowlist audit and
+  30-task collection plan, then stopped locally because `GITHUB_TOKEN` is not set. The generated
+  retry plan now keeps every task visible: four selected tasks are marked `missing_task_outcome`
+  and the remaining 26 tasks are marked `not_selected`.
 - The next data gate is to run authenticated production source-collection shards with
   `collection-export`, resolve retries with `collection-retry-plan` and `collection-retry-run`,
   merge the final shard state with `collection-summary`, then run `collection-audit`,
@@ -572,8 +576,8 @@ Immediate next execution plan:
      sleep throttling, and `--allow-partial` so rate-limited tasks remain visible in the summary.
    - Use `--require-github-token --github-token-env GITHUB_TOKEN` for production shards so missing
      authentication fails before any anonymous GitHub API request is made.
-   - Run `collection-retry-plan` after every shard or combined summary so failed, skipped, and
-     not-yet-selected tasks are assigned to explicit single-task retry shards.
+   - Run `collection-retry-plan` after every shard or combined summary so failed, skipped,
+     missing-outcome, and not-yet-selected tasks are assigned to explicit single-task retry shards.
    - Run `collection-retry-run` over selected retry tasks so incomplete shards can be resumed from
      machine-readable retry metadata instead of hand-copied command fragments.
    - Run `collection-summary` over the final source JSONL, every shard summary, and every retry-run
@@ -822,3 +826,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a GitHub token requirement gate for production source collection exports. |
 | 2026-07-03 | Added a collection retry runner that executes retry-plan tasks as resumable single-task shards. |
 | 2026-07-03 | Added a collection summary merge gate and updated the production source-collection plan to use merged summaries before readiness. |
+| 2026-07-03 | Fixed retry planning for auth-gated source collection shards with selected tasks but no task outcomes. |

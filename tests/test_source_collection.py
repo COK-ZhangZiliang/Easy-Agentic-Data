@@ -647,6 +647,67 @@ class SourceCollectionTests(unittest.TestCase):
                 {"not_selected": 1, "skipped_or_unverified": 1},
             )
 
+    def test_cli_collection_retry_plan_keeps_selected_tasks_without_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            summary_output = root / "summary.json"
+            retry_output = root / "retry.json"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "plan_tasks": 2,
+                        "task_offset": 0,
+                        "selected_tasks": 1,
+                        "processed_tasks": 0,
+                        "skipped_tasks": 0,
+                        "output_path": str(root / "records.jsonl"),
+                        "blocking_issues": [
+                            "missing_github_token: environment variable GITHUB_TOKEN is not set"
+                        ],
+                        "issues": [],
+                        "task_outcomes": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-retry-plan",
+                        "--plan",
+                        str(plan_output),
+                        "--export-summary",
+                        str(summary_output),
+                        "--output",
+                        str(retry_output),
+                    ]
+                )
+
+            retry_plan = json.loads(retry_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                retry_plan["reason_counts"],
+                {"missing_task_outcome": 1, "not_selected": 1},
+            )
+            self.assertEqual(
+                [task["task_index"] for task in retry_plan["retry_tasks"]],
+                [0, 1],
+            )
+            self.assertEqual(
+                retry_plan["retry_tasks"][0]["issue"],
+                "Selected collection task has no recorded outcome",
+            )
+
     def test_cli_collection_retry_run_executes_retry_plan_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

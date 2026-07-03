@@ -461,7 +461,7 @@ def build_source_collection_retry_plan(
     issues: list[SourceCollectionIssue] = []
     task_outcomes = export_summary.get("task_outcomes")
 
-    if isinstance(task_outcomes, list) and task_outcomes:
+    if isinstance(task_outcomes, list):
         outcome_indexes: set[int] = set()
         for raw_outcome in task_outcomes:
             if not isinstance(raw_outcome, dict):
