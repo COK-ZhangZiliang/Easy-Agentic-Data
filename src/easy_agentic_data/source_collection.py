@@ -108,6 +108,34 @@ class SourceCollectionPreflight:
 
 
 @dataclass
+class SourceCollectionShardSchedule:
+    """Deterministic shard schedule for production source collection."""
+
+    plan_tasks: int = 0
+    shard_size: int = 1
+    shard_count: int = 0
+    source_output_path: str = ""
+    summary_output_dir: str = ""
+    limit_per_task: int = 10
+    sleep_seconds: float = 0.0
+    resume: bool = True
+    allow_partial: bool = True
+    require_github_token: bool = False
+    github_token_env: str = ""
+    shards: list[dict[str, Any]] = field(default_factory=list)
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return self.shard_count > 0 and not any(issue.severity == "error" for issue in self.issues)
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        return value
+
+
+@dataclass
 class SourceExportSummary:
     """Summary of public source records exported from a collection plan."""
 
@@ -502,6 +530,155 @@ def summarize_source_collection_preflight(
         require_github_token=require_github_token,
         github_token_env=github_token_env,
         github_token_configured=github_token_configured,
+        issues=issues,
+    )
+
+
+def build_source_collection_shard_schedule(
+    collection_plan: dict[str, Any],
+    *,
+    plan_path: str | Path,
+    source_output_path: str | Path,
+    summary_output_dir: str | Path,
+    preflight_output_dir: str | Path | None = None,
+    shard_size: int = 4,
+    limit_per_task: int = 5,
+    sleep_seconds: float = 2.0,
+    resume: bool = True,
+    allow_partial: bool = True,
+    github_token_env: str = "",
+    require_github_token: bool = False,
+) -> SourceCollectionShardSchedule:
+    """Create deterministic source-collection shard commands without executing them."""
+
+    issues: list[SourceCollectionIssue] = []
+    if not isinstance(collection_plan, dict):
+        return SourceCollectionShardSchedule(
+            source_output_path=str(source_output_path),
+            summary_output_dir=str(summary_output_dir),
+            issues=[
+                SourceCollectionIssue(
+                    code="source_collection_plan_invalid",
+                    message="Collection plan must contain a JSON object",
+                )
+            ],
+        )
+    tasks = list(collection_plan.get("tasks", []))
+    plan_tasks = _int_field(collection_plan.get("total_tasks"), default=len(tasks))
+    if not plan_tasks:
+        plan_tasks = len(tasks)
+    if not collection_plan.get("valid"):
+        issues.append(
+            SourceCollectionIssue(
+                code="source_collection_plan_invalid",
+                message="Collection plan is not valid",
+            )
+        )
+    if plan_tasks <= 0:
+        issues.append(
+            SourceCollectionIssue(
+                code="missing_collection_plan_tasks",
+                message="Collection plan does not contain any tasks",
+            )
+        )
+    normalized_shard_size = max(0, shard_size)
+    if normalized_shard_size <= 0:
+        issues.append(
+            SourceCollectionIssue(
+                code="invalid_shard_size",
+                message="Shard size must be positive",
+            )
+        )
+        normalized_shard_size = 1
+
+    plan_text = str(plan_path)
+    source_text = str(source_output_path)
+    summary_dir = Path(summary_output_dir)
+    preflight_dir = Path(preflight_output_dir) if preflight_output_dir else summary_dir
+    shards = []
+    for shard_index, task_offset in enumerate(range(0, len(tasks), normalized_shard_size)):
+        selected_tasks = _selected_tasks(
+            tasks,
+            task_offset=task_offset,
+            max_tasks=normalized_shard_size,
+        )
+        shard_id = f"collection-shard-{shard_index:04d}"
+        summary_output = str(summary_dir / f"{shard_id}-export-summary.json")
+        preflight_output = str(preflight_dir / f"{shard_id}-preflight.json")
+        source_counts: Counter[str] = Counter(
+            _normalize_label(task.get("collection_source")) for task in selected_tasks
+        )
+        repositories = sorted({_repository(task) for task in selected_tasks if _repository(task)})
+        preflight_args = [
+            "registry",
+            "collection-preflight",
+            "--plan",
+            plan_text,
+            "--source",
+            source_text,
+            "--task-offset",
+            str(task_offset),
+            "--max-tasks",
+            str(normalized_shard_size),
+            "--output",
+            preflight_output,
+        ]
+        export_args = [
+            "registry",
+            "collection-export",
+            "--plan",
+            plan_text,
+            "--output",
+            source_text,
+            "--summary-output",
+            summary_output,
+            "--limit-per-task",
+            str(max(0, limit_per_task)),
+            "--task-offset",
+            str(task_offset),
+            "--max-tasks",
+            str(normalized_shard_size),
+            "--sleep-seconds",
+            _float_text(max(0.0, sleep_seconds)),
+        ]
+        if github_token_env:
+            preflight_args.extend(["--github-token-env", github_token_env])
+            export_args.extend(["--github-token-env", github_token_env])
+        if require_github_token:
+            preflight_args.append("--require-github-token")
+            export_args.append("--require-github-token")
+        if resume:
+            export_args.append("--resume")
+        if allow_partial:
+            export_args.append("--allow-partial")
+        shards.append(
+            {
+                "shard_id": shard_id,
+                "task_offset": task_offset,
+                "max_tasks": normalized_shard_size,
+                "selected_tasks": len(selected_tasks),
+                "repositories": repositories,
+                "collection_source_counts": dict(sorted(source_counts.items())),
+                "preflight_output": preflight_output,
+                "summary_output": summary_output,
+                "preflight_args": preflight_args,
+                "export_args": export_args,
+            }
+        )
+
+    return SourceCollectionShardSchedule(
+        plan_tasks=plan_tasks,
+        shard_size=normalized_shard_size,
+        shard_count=len(shards),
+        source_output_path=source_text,
+        summary_output_dir=str(summary_dir),
+        limit_per_task=max(0, limit_per_task),
+        sleep_seconds=max(0.0, sleep_seconds),
+        resume=resume,
+        allow_partial=allow_partial,
+        require_github_token=require_github_token,
+        github_token_env=github_token_env,
+        shards=shards,
         issues=issues,
     )
 
@@ -2203,6 +2380,12 @@ def _int_field(value: Any, *, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _float_text(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _text(value: Any) -> str:

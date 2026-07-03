@@ -126,6 +126,67 @@ class SourceCollectionTests(unittest.TestCase):
             self.assertTrue(json.loads(plan_output.read_text(encoding="utf-8"))["valid"])
             self.assertTrue(json.loads(audit_output.read_text(encoding="utf-8"))["valid"])
 
+    def test_cli_collection_shards_writes_deterministic_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            schedule_output = root / "schedule.json"
+            source_output = root / "source.jsonl"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-shards",
+                        "--plan",
+                        str(plan_output),
+                        "--source-output",
+                        str(source_output),
+                        "--summary-output-dir",
+                        str(root / "summaries"),
+                        "--preflight-output-dir",
+                        str(root / "preflight"),
+                        "--shard-size",
+                        "1",
+                        "--limit-per-task",
+                        "3",
+                        "--sleep-seconds",
+                        "0.5",
+                        "--resume",
+                        "--allow-partial",
+                        "--github-token-env",
+                        "GITHUB_TOKEN",
+                        "--require-github-token",
+                        "--output",
+                        str(schedule_output),
+                    ]
+                )
+
+            schedule = json.loads(schedule_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(schedule["valid"])
+            self.assertEqual(schedule["plan_tasks"], 2)
+            self.assertEqual(schedule["shard_size"], 1)
+            self.assertEqual(schedule["shard_count"], 2)
+            self.assertEqual(
+                [shard["collection_source_counts"] for shard in schedule["shards"]],
+                [{"issues": 1}, {"pull_requests": 1}],
+            )
+            first_shard = schedule["shards"][0]
+            self.assertEqual(first_shard["task_offset"], 0)
+            self.assertIn("collection-preflight", first_shard["preflight_args"])
+            self.assertIn("collection-export", first_shard["export_args"])
+            self.assertIn("--require-github-token", first_shard["preflight_args"])
+            self.assertIn("--resume", first_shard["export_args"])
+            self.assertIn("--allow-partial", first_shard["export_args"])
+            self.assertFalse(source_output.exists())
+
     def test_cli_collection_export_writes_auditable_public_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

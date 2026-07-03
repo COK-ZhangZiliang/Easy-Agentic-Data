@@ -458,6 +458,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add a collection-preflight gate that checks local plan validity, selected shard coverage,
   required GitHub authentication, and optional source/summary artifacts before any networked
   source export starts.
+- [x] Add a collection-shards gate that writes a deterministic shard runbook with task offsets,
+  source-type mix, output paths, and exact preflight/export arguments for production collection.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -515,6 +517,9 @@ Current checkpoint:
   source JSONL, optional summary files, and required GitHub authentication before networked source
   export begins. It records only whether the named token environment variable is configured, never
   the token value.
+- `registry collection-shards` now turns a production collection plan into a deterministic shard
+  runbook with one preflight/export command pair per shard, stable output paths, source-type
+  counts, and repository coverage for each shard.
 - Production `collection-export` runs can now use `--require-github-token` with
   `--github-token-env GITHUB_TOKEN` to fail locally when authenticated collection is not
   configured, instead of silently falling back to anonymous GitHub API limits.
@@ -546,6 +551,10 @@ Current checkpoint:
   report now exposes that blocker before export, and the generated retry plan keeps every task
   visible: four selected tasks are marked `missing_task_outcome` and the remaining 26 tasks are
   marked `not_selected`.
+- The deterministic production shard schedule now splits the 30 collection tasks into eight
+  authenticated shards with stable preflight and export command arguments. The first scheduled
+  shard preflight was executed and stopped locally before network access because `GITHUB_TOKEN` is
+  not set.
 - The next data gate is to run authenticated production source-collection shards with
   `collection-export`, resolve retries with `collection-retry-plan` and `collection-retry-run`,
   merge the final shard state with `collection-summary`, then run `collection-audit`,
@@ -580,6 +589,9 @@ Operational sequencing:
 Immediate next execution plan:
 
 1. **Authenticated source collection**
+   - Run `collection-shards` once from the production collection plan to freeze shard offsets,
+     per-shard summaries, and preflight/export command arguments before starting authenticated
+     collection.
    - Run `collection-preflight` before each production shard so missing authentication, empty task
      selections, invalid plans, malformed source JSONL, or missing resume summaries fail before
      any networked GitHub request starts.
@@ -839,3 +851,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a collection summary merge gate and updated the production source-collection plan to use merged summaries before readiness. |
 | 2026-07-03 | Fixed retry planning for auth-gated source collection shards with selected tasks but no task outcomes. |
 | 2026-07-03 | Added a source collection preflight gate for plan, shard, token, source, and summary checks before networked exports. |
+| 2026-07-03 | Added a deterministic source collection shard schedule gate for production runbooks. |

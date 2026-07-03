@@ -87,6 +87,7 @@ from easy_agentic_data.seed_corpus import build_seed_corpus, rehearse_registry_i
 from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
+    build_source_collection_shard_schedule,
     build_source_collection_retry_plan,
     build_source_collection_plan,
     export_public_source_records,
@@ -357,6 +358,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_plan_parser.add_argument("--output", default="")
     collection_plan_parser.add_argument("--output-root", default="runs/source-exports")
     collection_plan_parser.add_argument("--source-name", default="curated-public-sources")
+    collection_shards_parser = registry_subparsers.add_parser("collection-shards")
+    collection_shards_parser.add_argument("--plan", required=True)
+    collection_shards_parser.add_argument("--source-output", required=True)
+    collection_shards_parser.add_argument("--summary-output-dir", required=True)
+    collection_shards_parser.add_argument("--preflight-output-dir", default="")
+    collection_shards_parser.add_argument("--shard-size", type=int, default=4)
+    collection_shards_parser.add_argument("--limit-per-task", type=int, default=5)
+    collection_shards_parser.add_argument("--sleep-seconds", type=float, default=2.0)
+    collection_shards_parser.add_argument("--resume", action="store_true")
+    collection_shards_parser.add_argument("--allow-partial", action="store_true")
+    collection_shards_parser.add_argument("--github-token-env", default="")
+    collection_shards_parser.add_argument("--require-github-token", action="store_true")
+    collection_shards_parser.add_argument("--output", default="")
     collection_preflight_parser = registry_subparsers.add_parser("collection-preflight")
     collection_preflight_parser.add_argument("--plan", required=True)
     collection_preflight_parser.add_argument("--source", default="")
@@ -760,6 +774,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(plan, indent=2, sort_keys=True))
             return 0 if plan["valid"] else 2
+        if args.registry_command == "collection-shards":
+            schedule = build_source_collection_shard_schedule(
+                json.loads(Path(args.plan).read_text(encoding="utf-8")),
+                plan_path=args.plan,
+                source_output_path=args.source_output,
+                summary_output_dir=args.summary_output_dir,
+                preflight_output_dir=args.preflight_output_dir or None,
+                shard_size=args.shard_size,
+                limit_per_task=args.limit_per_task,
+                sleep_seconds=args.sleep_seconds,
+                resume=args.resume,
+                allow_partial=args.allow_partial,
+                github_token_env=args.github_token_env,
+                require_github_token=args.require_github_token,
+            )
+            payload = schedule.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if schedule.valid else 2
         if args.registry_command == "collection-preflight":
             preflight = summarize_source_collection_preflight(
                 json.loads(Path(args.plan).read_text(encoding="utf-8")),
