@@ -241,7 +241,7 @@ def export_public_source_records(
 
     for task_index, task in enumerate(selected_tasks):
         collection_source = _normalize_label(task.get("collection_source"))
-        if collection_source not in {"issues", "pull_requests"}:
+        if collection_source not in {"issues", "pull_requests", "ci"}:
             skipped_tasks += 1
             continue
         processed_tasks += 1
@@ -310,7 +310,7 @@ def summarize_source_collection_readiness(
     supported_plan_tasks = sum(
         1
         for task in tasks
-        if _normalize_label(task.get("collection_source")) in {"issues", "pull_requests"}
+        if _normalize_label(task.get("collection_source")) in {"issues", "pull_requests", "ci"}
     )
     selected_tasks = _int_field(export_summary.get("selected_tasks"))
     processed_tasks = _int_field(export_summary.get("processed_tasks"))
@@ -600,17 +600,22 @@ def _export_task_records(
         ][:limit]
     elif collection_source == "pull_requests":
         raw_records = client.pull_requests(task, limit=limit)[:limit]
+    elif collection_source == "ci":
+        raw_records = client.ci_runs(task, limit=limit)[:limit]
     else:
         return [], 0
     records = []
     skipped = 0
     for raw_record in raw_records:
-        record = _normalize_exported_record(
-            task,
-            raw_record,
-            source_type="pull_request" if collection_source == "pull_requests" else "issue",
-            client=client,
-        )
+        if collection_source == "ci":
+            record = _normalize_ci_record(task, raw_record, client=client)
+        else:
+            record = _normalize_exported_record(
+                task,
+                raw_record,
+                source_type="pull_request" if collection_source == "pull_requests" else "issue",
+                client=client,
+            )
         if _export_record_ready(record):
             records.append(record)
         else:
@@ -662,6 +667,86 @@ def _normalize_exported_record(
         "collection_source": _normalize_label(task.get("collection_source")),
         "source_name": _text(task.get("source_name")),
     }
+
+
+def _normalize_ci_record(
+    task: dict[str, Any],
+    raw_record: dict[str, Any],
+    *,
+    client: "_SourceClient",
+) -> dict[str, Any]:
+    repository = _repository(task)
+    run_id = _text(raw_record.get("id") or raw_record.get("run_id") or raw_record.get("number"))
+    if not run_id:
+        raise ValueError(f"CI run from {repository} is missing a stable run ID")
+    source_revision = _ci_source_revision(task, raw_record, client=client)
+    stable_commands = _list_field(task.get("stable_commands"))
+    conclusion = _normalize_label(raw_record.get("conclusion")) or "failure"
+    labels = sorted(
+        set(_label_names(raw_record.get("labels")) or _list_field(task.get("labels")))
+        | {"ci", conclusion}
+    )
+    workflow_name = _text(raw_record.get("name") or raw_record.get("workflow_name"))
+    title = _text(raw_record.get("display_title") or workflow_name or f"CI run {run_id}")
+    source_instance_id = f"{repository.replace('/', '__')}-ci-{run_id}"
+    return {
+        "id": source_instance_id,
+        "type": "ci_failure",
+        "repository": repository,
+        "source_uri": _text(task.get("source_uri")),
+        "source_revision": source_revision,
+        "source_instance_id": source_instance_id,
+        "source_url": _text(raw_record.get("html_url") or raw_record.get("url")),
+        "title": title,
+        "body": _ci_body(raw_record, workflow_name=workflow_name, source_revision=source_revision),
+        "labels": labels,
+        "license": _text(task.get("license")),
+        "language": _text(task.get("language")),
+        "ci_commands": stable_commands,
+        "candidate_verifier": {
+            "type": "ci_commands",
+            "commands": stable_commands,
+        },
+        "collection_source": "ci",
+        "source_name": _text(task.get("source_name")),
+    }
+
+
+def _ci_source_revision(
+    task: dict[str, Any],
+    raw_record: dict[str, Any],
+    *,
+    client: "_SourceClient",
+) -> str:
+    sha = _fixed_sha(raw_record.get("head_sha"))
+    if sha:
+        return sha
+    head_commit = raw_record.get("head_commit")
+    if isinstance(head_commit, dict):
+        sha = _fixed_sha(head_commit.get("id") or head_commit.get("sha"))
+        if sha:
+            return sha
+    task_revision = _fixed_sha(task.get("source_revision"))
+    if task_revision:
+        return task_revision
+    return client.default_branch_sha(_repository(task))
+
+
+def _ci_body(raw_record: dict[str, Any], *, workflow_name: str, source_revision: str) -> str:
+    lines = [
+        f"Workflow: {workflow_name or '<unknown>'}",
+        f"Status: {_text(raw_record.get('status')) or '<unknown>'}",
+        f"Conclusion: {_text(raw_record.get('conclusion')) or '<unknown>'}",
+        f"Event: {_text(raw_record.get('event')) or '<unknown>'}",
+        f"Head branch: {_text(raw_record.get('head_branch')) or '<unknown>'}",
+        f"Head SHA: {source_revision}",
+    ]
+    head_commit = raw_record.get("head_commit")
+    if isinstance(head_commit, dict):
+        message = _text(head_commit.get("message"))
+        if message:
+            lines.append(f"Commit message: {message}")
+    return "\n".join(lines)
 
 
 def _export_record_ready(record: dict[str, Any]) -> bool:
@@ -726,6 +811,9 @@ class _SourceClient:
     def pull_requests(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    def ci_runs(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     def default_branch_sha(self, repository: str) -> str:
         raise NotImplementedError
 
@@ -741,6 +829,10 @@ class _FixtureSourceClient(_SourceClient):
     def pull_requests(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
         del limit
         return self._records(_repository(task), "pull_requests.json")
+
+    def ci_runs(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        del limit
+        return self._records(_repository(task), "workflow_runs.json")
 
     def default_branch_sha(self, repository: str) -> str:
         metadata = self._payload(repository, "repository.json")
@@ -760,7 +852,12 @@ class _FixtureSourceClient(_SourceClient):
 
     def _records(self, repository: str, filename: str) -> list[dict[str, Any]]:
         payload = self._payload(repository, filename)
-        records = payload.get("records") if isinstance(payload, dict) else payload
+        if isinstance(payload, dict):
+            records = payload.get("records")
+            if records is None and filename == "workflow_runs.json":
+                records = payload.get("workflow_runs")
+        else:
+            records = payload
         if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
             raise ValueError(f"fixture {filename} for {repository} must contain records")
         return list(records)
@@ -798,6 +895,18 @@ class _GitHubSourceClient(_SourceClient):
         if not isinstance(payload, list):
             raise ValueError(f"GitHub pulls response for {repository} is not a list")
         return payload
+
+    def ci_runs(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        repository = _repository(task)
+        params = {
+            "status": "failure",
+            "per_page": str(min(max(limit, 1), 100)),
+        }
+        payload = self._get_json(f"/repos/{repository}/actions/runs", params=params)
+        runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+        if not isinstance(runs, list):
+            raise ValueError(f"GitHub workflow runs response for {repository} is not a list")
+        return runs
 
     def default_branch_sha(self, repository: str) -> str:
         if repository not in self._branch_cache:
@@ -986,7 +1095,13 @@ def _source_instance_id(record: dict[str, Any]) -> str:
     repository = _repository(record).replace("/", "__")
     number = _text(record.get("number") or record.get("issue_number") or record.get("pr_number"))
     if repository and number:
-        prefix = "pr" if _source_type(record) == "public_pr" else "issue"
+        source_type = _source_type(record)
+        if source_type == "public_pr":
+            prefix = "pr"
+        elif source_type == "public_ci":
+            prefix = "ci"
+        else:
+            prefix = "issue"
         return f"{repository}-{prefix}-{number}"
     return _source_url(record)
 
@@ -995,6 +1110,8 @@ def _source_type(record: dict[str, Any]) -> str:
     explicit = _normalize_label(record.get("source_type") or record.get("type") or record.get("kind"))
     if explicit in {"pr", "pull_request", "public_pr"}:
         return "public_pr"
+    if explicit in {"ci", "ci_failure", "workflow_run", "public_ci"}:
+        return "public_ci"
     return "public_issue"
 
 
@@ -1004,6 +1121,8 @@ def _readiness_source_type(value: Any) -> str:
         return "public_issue"
     if normalized in {"pr", "prs", "pull_request", "pull_requests", "public_pr"}:
         return "public_pr"
+    if normalized in {"ci", "ci_failure", "workflow_run", "workflow_runs", "public_ci"}:
+        return "public_ci"
     return normalized
 
 

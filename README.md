@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-168%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-170%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -267,6 +267,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
   --max-quarantined 0 \
   --require-source-type public_issue \
   --require-source-type public_pr \
+  --require-source-type public_ci \
   --require-clean-export \
   --require-all-plan-tasks \
   --output runs/seed-corpus-demo/production-source-readiness.json
@@ -291,14 +292,16 @@ with `--github-token-env GITHUB_TOKEN` when rate limits require it. Use `--max-t
 `--task-offset`, `--resume`, and `--sleep-seconds` to shard and resume collection without
 duplicating source-instance IDs. `--allow-partial` is useful for rate-limited runs because valid
 records are still written and can be audited while failed tasks remain visible in the summary. CI
-collection tasks remain plan entries for now; the exporter skips them until a CI-specific record
-contract is added. `collection-readiness` combines the collection plan, export summary, and audit
-output into the registry-import gate: small probes can lower `--min-accepted`, while production
-runs should require the policy target, both issue and PR records, clean export summaries, and full
-plan-task coverage. `import-rehearsal` then imports the audited source JSONL into a temporary
-registry, applies the allowlist, runs registry validation and seed-audit gates, and writes a
-pre-materialization summary. Until real exported records exist, use the toy demo below to validate
-the end-to-end local gate mechanics:
+collection tasks export `public_ci` records from failed workflow runs with fixed head SHAs and
+`ci_commands` verifier evidence. They are collection/audit records only until a CI-specific
+registry importer is added; the public issue/PR importer rejects them instead of silently treating
+them as issue records. `collection-readiness` combines the collection plan, export summary, and
+audit output into the registry-import gate: small probes can lower `--min-accepted`, while
+production runs should require the policy target, issue, PR, and CI records, clean export
+summaries, and full plan-task coverage. `import-rehearsal` then imports the audited trainable
+source JSONL into a temporary registry, applies the allowlist, runs registry validation and
+seed-audit gates, and writes a pre-materialization summary. Until real exported records exist, use
+the toy demo below to validate the end-to-end local gate mechanics:
 
 ```bash
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \

@@ -436,6 +436,9 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add a reusable registry import rehearsal gate that imports audited sources into a temporary
   registry, applies repository allowlists, runs registry validation, and enforces seed-audit policy
   before materialization.
+- [x] Add a CI-specific source collection record contract for failed workflow runs, including fixed
+  head revisions, public run URLs, labels, and `ci_commands` verifier evidence, while blocking
+  accidental public issue/PR import of CI records.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -473,9 +476,10 @@ Current checkpoint:
 - This checkpoint is not production approval. Ten repositories satisfy the first repository-share
   threshold for a 1,000-seed corpus, but the allowlist is still Python-only, exported public records
   have not yet been collected, and `scale_decision.approved` remains false.
-- `registry collection-export` now turns issue and pull-request collection-plan tasks into
-  normalized public source JSONL. It supports fixture-backed tests and GitHub API collection, while
-  CI collection tasks remain planned but skipped until a CI-specific record contract is added.
+- `registry collection-export` now turns issue, pull-request, and CI collection-plan tasks into
+  normalized public source JSONL. Issue and PR records are trainable-source candidates for the
+  public issue/PR importer; CI records are auditable source records until a CI-specific importer
+  lands.
 - `collection-export` supports task offsets, max-task shards, sleep throttling, resume without
   duplicate source-instance IDs, summary files, and partial-success mode for API rate limits.
 - `registry collection-readiness` now combines the collection plan, export summary, and collection
@@ -488,12 +492,16 @@ Current checkpoint:
   audited source JSONL, applying the repository allowlist, running registry validation, enforcing
   seed-audit policy, and returning a blocking exit code when import, quarantine, or coverage gates
   fail.
-- The latest anonymous GitHub API collection attempt covered all 30 planned tasks and processed
-  all 20 supported issue/PR tasks, but every issue/PR request hit HTTP 403 rate limits. The current
-  source collection remains a probe with 2 accepted PR records, no accepted issue records, and no
-  production import approval.
-- The next data gate is to run all production issue/PR shards with `collection-export`, then run
-  `collection-audit` and `collection-readiness` before registry import.
+- `collection-export` can now export CI failure records as `public_ci` audit records with fixed
+  workflow-run revisions and `ci_commands` evidence. These records are intentionally rejected by
+  the public issue/PR importer until a CI-specific registry importer is added.
+- The latest anonymous GitHub API collection attempt covered and processed all 30 planned tasks
+  after CI collection support. It added five PR records to the existing two-record probe, but 28
+  GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
+  with 7 accepted PR records, no accepted issue or CI records, and no production import approval.
+- The next data gate is to run authenticated production source-collection shards with
+  `collection-export`, then run `collection-audit`, `collection-readiness`, and
+  `import-rehearsal` before any registry materialization or provider rollout.
 
 Next milestone plan:
 
@@ -519,6 +527,63 @@ Operational sequencing:
    issues rather than silent success.
 5. Keep every generated source, registry, review, pilot, and manifest artifact under `runs/` or an
    explicitly configured external data root; do not commit production data outputs.
+
+Immediate next execution plan:
+
+1. **Authenticated source collection**
+   - Run resumable `collection-export` shards with a GitHub token, fixed task offsets, conservative
+     sleep throttling, and `--allow-partial` so rate-limited tasks remain visible in the summary.
+   - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
+   - Exit gate: all 30 current plan tasks are processed without unresolved HTTP errors, or every
+     remaining failure is assigned to a retry shard with the exact task ID and repository.
+
+2. **Source audit and readiness**
+   - Run `collection-audit` against the exported source JSONL and the checked-in allowlist.
+   - Run `collection-readiness` with the production minimum, zero quarantine budget, required
+     `public_issue`, `public_pr`, and `public_ci` source types, clean export summaries, and full
+     plan-task coverage.
+   - Exit gate: readiness is true; otherwise the corpus remains a probe and cannot feed registry
+     import or paid DeepSeek V4 Pro synthesis.
+
+3. **Trainable issue/PR import rehearsal**
+   - Filter or shard issue/PR source records away from `public_ci` records before using the
+     current public issue/PR importer.
+   - Run `import-rehearsal` into a temporary registry with allowlist enforcement, registry
+     validation, seed-audit gates, and explicit quarantine accounting.
+   - Exit gate: imported issue/PR seeds have stable task IDs, fixed revisions, compatible licenses,
+     source-instance IDs, task families, verifier types, train eligibility, and coverage tags.
+
+4. **CI importer design before CI training use**
+   - Add a CI-specific registry importer that maps failed workflow runs to reproducible
+     workspaces, stores `ci_commands` as verifier evidence, and avoids treating workflow failures
+     as issue text.
+   - Add fixture, import, registry-validation, and seed-audit tests before any `public_ci` record is
+     marked trainable.
+   - Exit gate: CI records can be imported, materialized, reset, and verified without passing
+     through the public issue/PR importer.
+
+5. **Coverage backfill and holdout separation**
+   - Use seed-audit gaps from real source import to decide which repository-grounded synthetic
+     families are still needed.
+   - Build or refresh the holdout registry before scale-up so benchmark and curated evaluation
+     sources remain separate from trainable seeds.
+   - Exit gate: seed and scenario decontamination pass for query text, provenance, source
+     instances, hidden tests, reference artifacts, oracle hashes, and patch/test-patch hashes.
+
+6. **Human review and small provider pilot**
+   - Generate the stratified human-review queue from the candidate train registry and quarantine
+     every actionable source-quality, privacy, leakage, or verifier issue.
+   - Run a small DeepSeek V4 Pro registry-backed pilot only after source, import, coverage,
+     decontamination, and review gates pass.
+   - Exit gate: trace validity, tool success, reward distribution, hard-check failure handling,
+     prompt leakage checks, and cost reports justify larger shards.
+
+7. **Manifest freeze for scale-up**
+   - Freeze the train registry, holdout registry, source snapshots, prompt/config versions, audit
+     outputs, review decisions, pilot selection, provider settings, and scale decision in a
+     versioned seed-corpus manifest.
+   - Exit gate: large DeepSeek V4 Pro shards launch only from that immutable manifest; any source,
+     prompt, verifier, or registry change creates a new manifest version.
 
 1. **Corpus budget and source policy**
    - Define the initial scale target, minimum count per supported task family, required verifier
@@ -701,3 +766,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a source collection readiness gate before production seed-corpus registry import. |
 | 2026-07-03 | Verified a small public issue/PR registry import rehearsal and fixed noisy PR checklist task-family inference. |
 | 2026-07-03 | Added a reusable registry import rehearsal gate for audited public source records. |
+| 2026-07-03 | Added a CI source collection record contract while keeping CI records out of the issue/PR importer. |

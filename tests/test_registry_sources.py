@@ -350,6 +350,21 @@ class RegistrySourceTests(unittest.TestCase):
         self.assertIn("hidden_command", scenario.query_seed.verifier_types)
         self.assertIn("task_family:bug_repair", scenario.query_seed.coverage_tags)
 
+    def test_public_issue_pr_import_skips_ci_records_without_ci_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ScenarioRegistry(directory)
+            summary = import_public_issue_pr_records(
+                registry,
+                [_public_ci_record()],
+                source_format="public-issue-pr",
+                source_name="curated-public-sources",
+            )
+
+            self.assertEqual(summary.imported, 0)
+            self.assertEqual(summary.skipped, 1)
+            self.assertIn("CI source records require", summary.issues[0])
+            self.assertEqual(registry.list_scenarios(), [])
+
     def test_public_issue_auto_blocks_non_allowlisted_license(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry = ScenarioRegistry(directory)
@@ -519,6 +534,24 @@ def _public_issue_record() -> dict[str, object]:
         "image_digest": PINNED_IMAGE,
         "test_commands": ["python -m pytest tests/test_parser.py::test_whitespace"],
         "patch": "SECRET_ORACLE_PATCH",
+    }
+
+
+def _public_ci_record() -> dict[str, object]:
+    return {
+        **_public_issue_record(),
+        "id": "ci-100",
+        "type": "ci_failure",
+        "source_instance_id": "example__tool-ci-100",
+        "source_url": "https://github.com/example/tool/actions/runs/100",
+        "title": "CI failure on parser workflow",
+        "body": "The parser workflow failed on a fixed commit.",
+        "labels": ["ci", "failure"],
+        "ci_commands": ["python -m pytest"],
+        "candidate_verifier": {
+            "type": "ci_commands",
+            "commands": ["python -m pytest"],
+        },
     }
 
 

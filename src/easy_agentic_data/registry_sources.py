@@ -565,11 +565,16 @@ def _coverage_tags(
 def _public_source_type(record: dict[str, Any], source_format: str) -> str:
     explicit = _text_field(
         _first_present(record, ("source_type", "record_type", "type", "kind"))
-    ).lower()
-    if explicit in {"issue", "public_issue"}:
+    )
+    normalized = explicit.lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"issue", "public_issue"}:
         return "public_issue"
-    if explicit in {"pr", "pull_request", "public_pr"}:
+    if normalized in {"pr", "pull_request", "public_pr"}:
         return "public_pr"
+    if normalized in {"ci", "ci_failure", "workflow_run", "public_ci"}:
+        raise ValueError("CI source records require a CI-specific registry importer")
+    if normalized:
+        raise ValueError(f"unsupported public issue/PR source type: {explicit}")
     if source_format in {"public_issue", "public_pr"}:
         return source_format
     if "pull_request" in record or "pull_request_url" in record or "merged_at" in record:

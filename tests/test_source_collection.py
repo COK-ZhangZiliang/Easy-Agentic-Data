@@ -233,6 +233,102 @@ class SourceCollectionTests(unittest.TestCase):
             )
             self.assertTrue(all(record["candidate_verifier"] for record in exported_records))
 
+    def test_cli_collection_export_writes_auditable_ci_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowlist = root / "allowlist.json"
+            plan_output = root / "plan.json"
+            export_output = root / "exports.jsonl"
+            audit_output = root / "audit.json"
+            readiness_output = root / "readiness.json"
+            _write_fixture_source(root / "fixtures", include_pull_requests=False, include_ci=True)
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record_with_ci()]}),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                plan_exit_code = main(
+                    [
+                        "registry",
+                        "collection-plan",
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(plan_output),
+                    ]
+                )
+            export_stdout = io.StringIO()
+            with redirect_stdout(export_stdout):
+                export_exit_code = main(
+                    [
+                        "registry",
+                        "collection-export",
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(export_output),
+                        "--fixture-root",
+                        str(root / "fixtures"),
+                        "--limit-per-task",
+                        "1",
+                    ]
+                )
+            with redirect_stdout(io.StringIO()):
+                audit_exit_code = main(
+                    [
+                        "registry",
+                        "collection-audit",
+                        "--source",
+                        str(export_output),
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(audit_output),
+                    ]
+                )
+
+            records = [
+                json.loads(line) for line in export_output.read_text(encoding="utf-8").splitlines()
+            ]
+            export_summary = json.loads(export_stdout.getvalue())
+            (root / "summary.json").write_text(
+                json.dumps(export_summary),
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                readiness_exit_code = main(
+                    [
+                        "registry",
+                        "collection-readiness",
+                        "--plan",
+                        str(plan_output),
+                        "--export-summary",
+                        str(root / "summary.json"),
+                        "--audit",
+                        str(audit_output),
+                        "--min-accepted",
+                        "2",
+                        "--require-source-type",
+                        "public_issue",
+                        "--require-source-type",
+                        "public_ci",
+                        "--output",
+                        str(readiness_output),
+                    ]
+                )
+            audit = json.loads(audit_output.read_text(encoding="utf-8"))
+            ci_record = next(record for record in records if record["type"] == "ci_failure")
+            self.assertEqual(plan_exit_code, 0)
+            self.assertEqual(export_exit_code, 0)
+            self.assertEqual(audit_exit_code, 0)
+            self.assertEqual(readiness_exit_code, 0)
+            self.assertEqual(export_summary["source_type_counts"]["public_ci"], 1)
+            self.assertEqual(audit["source_type_counts"]["public_ci"], 1)
+            self.assertEqual(ci_record["source_revision"], "c" * 40)
+            self.assertEqual(ci_record["ci_commands"], ["python -m build", "python -m pytest"])
+            self.assertEqual(ci_record["candidate_verifier"]["type"], "ci_commands")
+
     def test_cli_collection_export_resumes_without_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -510,7 +606,24 @@ def _allowlist_record() -> dict[str, object]:
     }
 
 
-def _write_fixture_source(root: Path, *, include_pull_requests: bool) -> None:
+def _allowlist_record_with_ci() -> dict[str, object]:
+    return {
+        **_allowlist_record(),
+        "collection_sources": ["issues", "ci"],
+        "labels": ["ci", "failure"],
+        "issue_labels": ["bug", "parser"],
+        "pr_labels": [],
+        "test_commands": ["python -m pytest"],
+        "ci_commands": ["python -m build"],
+    }
+
+
+def _write_fixture_source(
+    root: Path,
+    *,
+    include_pull_requests: bool,
+    include_ci: bool = False,
+) -> None:
     fixture_repo = root / "example__tool"
     (fixture_repo / "branches").mkdir(parents=True)
     (fixture_repo / "repository.json").write_text(
@@ -548,6 +661,30 @@ def _write_fixture_source(root: Path, *, include_pull_requests: bool) -> None:
                         "base": {"sha": "b" * 40},
                     }
                 ]
+            ),
+            encoding="utf-8",
+        )
+    if include_ci:
+        (fixture_repo / "workflow_runs.json").write_text(
+            json.dumps(
+                {
+                    "workflow_runs": [
+                        {
+                            "id": 202,
+                            "html_url": "https://github.com/example/tool/actions/runs/202",
+                            "name": "tests",
+                            "display_title": "CI failure on parser change",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "event": "pull_request",
+                            "head_branch": "parser-whitespace",
+                            "head_sha": "c" * 40,
+                            "head_commit": {
+                                "message": "Fix parser whitespace handling",
+                            },
+                        }
+                    ]
+                }
             ),
             encoding="utf-8",
         )
