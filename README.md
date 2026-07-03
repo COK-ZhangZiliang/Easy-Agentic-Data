@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-184%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-187%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -281,6 +281,13 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-retry-run \
   --allow-partial \
   --sleep-seconds 2
 
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-summary \
+  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
+  --summary runs/seed-corpus-demo/production-source-export-summary.json \
+  --summary runs/seed-corpus-demo/production-source-retry-run-summary.json \
+  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
+  --output runs/seed-corpus-demo/production-source-merged-summary.json
+
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
   --source runs/seed-corpus-demo/production-public-source-records.jsonl \
   --allowlist examples/production-repository-allowlist.json \
@@ -288,7 +295,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
 
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
   --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --export-summary runs/seed-corpus-demo/production-source-export-summary.json \
+  --export-summary runs/seed-corpus-demo/production-source-merged-summary.json \
   --audit runs/seed-corpus-demo/production-source-collection-audit.json \
   --min-accepted 1000 \
   --max-quarantined 0 \
@@ -352,13 +359,16 @@ tasks into explicit retry shards with task IDs, repositories, source types, and
 `--task-offset N --max-tasks 1` arguments. `collection-retry-run` consumes that retry plan and
 executes those single-task shards against the same source JSONL with resume enabled, so a
 rate-limited run can continue from machine-readable retry metadata instead of hand-copied
-commands. CI collection tasks export
+commands. `collection-summary` then rebuilds a readiness-compatible export summary from the final
+source JSONL plus every export and retry-run summary. The final JSONL is the record-count source of
+truth, so resumed shards and retries cannot double-count records, while unresolved task failures
+remain visible before readiness. CI collection tasks export
 `public_ci` records from failed workflow runs with fixed head SHAs and `ci_commands` verifier
 evidence. Import issue/PR and CI records through their matching formats: the public issue/PR
 importer still rejects CI records, while `--format public-ci` maps CI commands to hidden verifier
-commands for `ci_build` seeds. `collection-readiness` combines the collection plan, export
+commands for `ci_build` seeds. `collection-readiness` combines the collection plan, merged export
 summary, and audit output into the registry-import gate: small probes can lower `--min-accepted`,
-while production runs should require the policy target, issue, PR, and CI records, clean export
+while production runs should require the policy target, issue, PR, and CI records, clean merged
 summaries, and full plan-task coverage. `collection-split` then routes the mixed export into
 importer-specific shards so issue/PR and CI rehearsals cannot accidentally consume each other's
 record types. `import-rehearsal` imports each audited trainable source shard into a temporary

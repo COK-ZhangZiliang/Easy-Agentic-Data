@@ -452,6 +452,9 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   configured GitHub token before making network requests.
 - [x] Add a retry-run gate that consumes collection retry plans and executes single-task retry
   shards against the shared source JSONL with resume behavior.
+- [x] Add a collection-summary gate that rebuilds one readiness-compatible export summary from
+  the final source JSONL plus all shard and retry-run summaries, avoiding record double-counting
+  while preserving unresolved task failures.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -501,6 +504,10 @@ Current checkpoint:
 - `registry collection-retry-run` can now consume those retry plans and execute selected retry
   tasks against the shared source JSONL with resume enabled, producing a retry-run summary for
   follow-up audit and readiness decisions.
+- `registry collection-summary` now rebuilds a single readiness-compatible export summary from
+  the final source JSONL plus all collection-export and collection-retry-run summaries. The final
+  JSONL is the record-count source of truth, while task outcomes from later retry summaries replace
+  earlier failed shard outcomes so resolved rate-limit failures do not block a clean gate.
 - Production `collection-export` runs can now use `--require-github-token` with
   `--github-token-env GITHUB_TOKEN` to fail locally when authenticated collection is not
   configured, instead of silently falling back to anonymous GitHub API limits.
@@ -528,14 +535,16 @@ Current checkpoint:
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
   with 7 accepted PR records, no accepted issue or CI records, and no production import approval.
 - The next data gate is to run authenticated production source-collection shards with
-  `collection-export`, then run `collection-audit`, `collection-readiness`, and
-  `import-rehearsal` before any registry materialization or provider rollout.
+  `collection-export`, resolve retries with `collection-retry-plan` and `collection-retry-run`,
+  merge the final shard state with `collection-summary`, then run `collection-audit`,
+  `collection-readiness`, and `import-rehearsal` before any registry materialization or provider
+  rollout.
 
 Next milestone plan:
 
 | Milestone | Inputs | Actions | Outputs | Exit gate |
 | --- | --- | --- | --- | --- |
-| P7.1 Source collection readiness | Production policy, repository allowlist, collection plan, export summaries, and collection audit outputs | Run all issue/PR export shards, resume rate-limited shards, audit exported records, and summarize accepted, quarantined, skipped, duplicate, and failed tasks | Public source JSONL, export summary JSON, collection audit JSON, readiness summary JSON | Accepted source records meet the configured minimum, quarantine count is within budget, required source types are present, and all unresolved export failures are explicitly listed |
+| P7.1 Source collection readiness | Production policy, repository allowlist, collection plan, shard export summaries, retry-run summaries, and collection audit outputs | Run all issue/PR/CI export shards, resume rate-limited shards, merge the final source JSONL and summaries, audit exported records, and summarize accepted, quarantined, skipped, duplicate, and failed tasks | Public source JSONL, merged export summary JSON, collection audit JSON, readiness summary JSON | Accepted source records meet the configured minimum, quarantine count is within budget, required source types are present, the merged summary covers all plan tasks, and all unresolved export failures are explicitly listed |
 | P7.2 Registry import rehearsal | Audited public source JSONL, repository allowlist, fixed-revision rules, and license allowlist | Import records into a temporary train registry, reject records outside the allowlist, verify fixed commits, and run registry validation before creating scenarios | Temporary train registry, import manifest, rejected-record report, registry validation output | Every accepted seed has a stable `task_id`, fixed source revision, license-compatible provenance, train eligibility, contamination tags, task family, source method, verifier types, and coverage tags |
 | P7.3 Synthetic coverage backfill | Seed-audit gaps from the import rehearsal and fixed repository snapshots | Generate repository-grounded synthetic tasks only for missing families, verifier types, languages, or difficulty bands; keep synthetic records separated by `source_method` | Synthetic source specs, generated train registry records, verifier-evidence report | Synthetic seeds improve audited coverage without replacing required real-source records or satisfying verifier requirements they do not actually exercise |
 | P7.4 Holdout and decontamination | Benchmark registries, curated non-train sources, hidden evaluator metadata, and train registry candidates | Build the holdout registry, run seed and scenario audits, compare normalized prompts, provenance, source instances, hidden tests, reference artifacts, oracle hashes, and patch/test-patch hashes | Holdout registry, seed decontamination report, scenario decontamination report, quarantine report | No trainable scenario overlaps held-out evaluator oracles; every contamination hit is removed, relabeled non-train, or quarantined with an explicit reason |
@@ -567,15 +576,19 @@ Immediate next execution plan:
      not-yet-selected tasks are assigned to explicit single-task retry shards.
    - Run `collection-retry-run` over selected retry tasks so incomplete shards can be resumed from
      machine-readable retry metadata instead of hand-copied command fragments.
+   - Run `collection-summary` over the final source JSONL, every shard summary, and every retry-run
+     summary before any audit/readiness decision. Treat this merged summary as the only
+     production `collection-readiness --export-summary` input.
    - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
-   - Exit gate: all 30 current plan tasks are processed without unresolved HTTP errors, or every
-     remaining failure is assigned to a retry shard with the exact task ID and repository.
+   - Exit gate: all 30 current plan tasks are represented in the merged summary, resolved retry
+     attempts replace earlier failed shard outcomes, and every remaining failure is assigned to a
+     task ID, repository, source type, retry status, and next action.
 
 2. **Source audit and readiness**
    - Run `collection-audit` against the exported source JSONL and the checked-in allowlist.
-   - Run `collection-readiness` with the production minimum, zero quarantine budget, required
-     `public_issue`, `public_pr`, and `public_ci` source types, clean export summaries, and full
-     plan-task coverage.
+   - Run `collection-readiness` with the merged export summary, production minimum, zero quarantine
+     budget, required `public_issue`, `public_pr`, and `public_ci` source types, clean export
+     summaries, and full plan-task coverage.
    - Exit gate: readiness is true; otherwise the corpus remains a probe and cannot feed registry
      import or paid DeepSeek V4 Pro synthesis.
 
@@ -808,3 +821,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added per-task source export outcomes and retry planning for incomplete collection shards. |
 | 2026-07-03 | Added a GitHub token requirement gate for production source collection exports. |
 | 2026-07-03 | Added a collection retry runner that executes retry-plan tasks as resumable single-task shards. |
+| 2026-07-03 | Added a collection summary merge gate and updated the production source-collection plan to use merged summaries before readiness. |

@@ -10,6 +10,7 @@ from easy_agentic_data.cli import main
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
     build_source_collection_plan,
+    merge_source_export_summaries,
 )
 
 
@@ -72,6 +73,10 @@ class SourceCollectionTests(unittest.TestCase):
         self.assertIn("missing_candidate_verifier", codes)
         self.assertIn("non_public_source_url", codes)
         self.assertIn("private_url", codes)
+
+    def test_merge_source_export_summaries_rejects_malformed_summary_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "JSON objects"):
+            merge_source_export_summaries([_source_record()], [[]])
 
     def test_cli_collection_plan_and_audit_write_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -771,6 +776,198 @@ class SourceCollectionTests(unittest.TestCase):
         finally:
             if old_value is not None:
                 os.environ[env_name] = old_value
+
+    def test_cli_collection_summary_merges_export_and_retry_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            source_output = root / "source.jsonl"
+            export_summary_output = root / "export-summary.json"
+            retry_summary_output = root / "retry-summary.json"
+            merged_summary_output = root / "merged-summary.json"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            issue_task = plan["tasks"][0]
+            pr_task = plan["tasks"][1]
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            source_output.write_text(
+                json.dumps(_source_record()) + "\n" + json.dumps(_pr_source_record()) + "\n",
+                encoding="utf-8",
+            )
+            export_summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "plan_tasks": 2,
+                        "task_offset": 0,
+                        "selected_tasks": 2,
+                        "processed_tasks": 2,
+                        "exported": 1,
+                        "issues": [f"{pr_task['task_id']}: HTTP Error 403"],
+                        "task_outcomes": [
+                            {
+                                "task_id": issue_task["task_id"],
+                                "task_index": 0,
+                                "repository": "example/tool",
+                                "collection_source": "issues",
+                                "status": "processed",
+                                "new_records": 1,
+                            },
+                            {
+                                "task_id": pr_task["task_id"],
+                                "task_index": 1,
+                                "repository": "example/tool",
+                                "collection_source": "pull_requests",
+                                "status": "failed",
+                                "issue": f"{pr_task['task_id']}: HTTP Error 403",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            retry_summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": True,
+                        "retry_tasks": 1,
+                        "selected_retry_tasks": 1,
+                        "attempted_tasks": 1,
+                        "completed_tasks": 1,
+                        "attempts": [
+                            {
+                                "task_id": pr_task["task_id"],
+                                "task_index": 1,
+                                "repository": "example/tool",
+                                "collection_source": "pull_requests",
+                                "status": "processed",
+                                "new_records": 1,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-summary",
+                        "--source",
+                        str(source_output),
+                        "--summary",
+                        str(export_summary_output),
+                        "--summary",
+                        str(retry_summary_output),
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(merged_summary_output),
+                    ]
+                )
+
+            summary = json.loads(merged_summary_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(summary["valid"])
+            self.assertEqual(summary["exported"], 2)
+            self.assertEqual(summary["selected_tasks"], 2)
+            self.assertEqual(summary["processed_tasks"], 2)
+            self.assertEqual(summary["issues"], [])
+            self.assertEqual(
+                summary["source_type_counts"],
+                {"public_issue": 1, "public_pr": 1},
+            )
+            self.assertEqual(
+                [outcome["status"] for outcome in summary["task_outcomes"]],
+                ["processed", "processed"],
+            )
+
+    def test_cli_collection_summary_blocks_unresolved_issues_without_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            source_output = root / "source.jsonl"
+            export_summary_output = root / "export-summary.json"
+            merged_summary_output = root / "merged-summary.json"
+            partial_summary_output = root / "partial-summary.json"
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            failed_task = plan["tasks"][1]
+            issue = f"{failed_task['task_id']}: HTTP Error 403"
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            source_output.write_text(json.dumps(_source_record()) + "\n", encoding="utf-8")
+            export_summary_output.write_text(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "plan_tasks": 2,
+                        "task_offset": 0,
+                        "selected_tasks": 2,
+                        "processed_tasks": 2,
+                        "exported": 1,
+                        "issues": [issue],
+                        "task_outcomes": [
+                            {
+                                "task_id": failed_task["task_id"],
+                                "task_index": 1,
+                                "repository": "example/tool",
+                                "collection_source": "pull_requests",
+                                "status": "failed",
+                                "issue": issue,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-summary",
+                        "--source",
+                        str(source_output),
+                        "--summary",
+                        str(export_summary_output),
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(merged_summary_output),
+                    ]
+                )
+            with redirect_stdout(io.StringIO()):
+                partial_exit_code = main(
+                    [
+                        "registry",
+                        "collection-summary",
+                        "--source",
+                        str(source_output),
+                        "--summary",
+                        str(export_summary_output),
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(partial_summary_output),
+                        "--allow-partial",
+                    ]
+                )
+
+            summary = json.loads(merged_summary_output.read_text(encoding="utf-8"))
+            partial_summary = json.loads(partial_summary_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(summary["valid"])
+            self.assertEqual(summary["issues"], [issue])
+            self.assertEqual(partial_exit_code, 0)
+            self.assertTrue(partial_summary["valid"])
+            self.assertTrue(partial_summary["allow_partial"])
 
     def test_cli_collection_split_routes_mixed_records_by_source_type(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

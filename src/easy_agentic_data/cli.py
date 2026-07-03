@@ -90,6 +90,7 @@ from easy_agentic_data.source_collection import (
     build_source_collection_retry_plan,
     build_source_collection_plan,
     export_public_source_records,
+    merge_source_export_summaries,
     run_source_collection_retry_plan,
     split_public_source_records,
     summarize_source_collection_readiness,
@@ -391,6 +392,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_retry_run_parser.add_argument("--require-github-token", action="store_true")
     collection_retry_run_parser.add_argument("--timeout-seconds", type=float, default=30.0)
     collection_retry_run_parser.add_argument("--allow-partial", action="store_true")
+    collection_summary_parser = registry_subparsers.add_parser("collection-summary")
+    collection_summary_parser.add_argument("--source", required=True)
+    collection_summary_parser.add_argument(
+        "--summary",
+        action="append",
+        required=True,
+        help="Collection export or retry-run summary to merge; may be repeated",
+    )
+    collection_summary_parser.add_argument("--plan", default="")
+    collection_summary_parser.add_argument("--output", default="")
+    collection_summary_parser.add_argument("--allow-partial", action="store_true")
     collection_split_parser = registry_subparsers.add_parser("collection-split")
     collection_split_parser.add_argument("--source", required=True)
     collection_split_parser.add_argument("--output", required=True)
@@ -795,6 +807,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.summary_output:
                 Path(args.summary_output).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.summary_output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if summary.valid else 2
+        if args.registry_command == "collection-summary":
+            plan = json.loads(Path(args.plan).read_text(encoding="utf-8")) if args.plan else None
+            summary = merge_source_export_summaries(
+                load_source_records(args.source),
+                [
+                    json.loads(Path(summary_path).read_text(encoding="utf-8"))
+                    for summary_path in args.summary
+                ],
+                collection_plan=plan,
+                output_path=args.source,
+                allow_partial=args.allow_partial,
+            )
+            payload = summary.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
                     json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )

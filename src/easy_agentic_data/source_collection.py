@@ -723,6 +723,140 @@ def split_public_source_records(
     )
 
 
+def merge_source_export_summaries(
+    records: Iterable[dict[str, Any]],
+    summaries: Iterable[dict[str, Any]],
+    *,
+    collection_plan: dict[str, Any] | None = None,
+    output_path: str | Path = "",
+    allow_partial: bool = False,
+) -> SourceExportSummary:
+    """Rebuild a readiness-compatible export summary from final records and shard summaries."""
+
+    record_list = list(records)
+    summary_list = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            raise ValueError("Collection summary inputs must be JSON objects")
+        summary_list.append(summary)
+    if collection_plan is not None and not isinstance(collection_plan, dict):
+        raise ValueError("Collection plan must be a JSON object")
+    tasks = list(collection_plan.get("tasks", [])) if isinstance(collection_plan, dict) else []
+    plan_tasks = (
+        _int_field(collection_plan.get("total_tasks"), default=len(tasks))
+        if isinstance(collection_plan, dict)
+        else 0
+    )
+    if not plan_tasks:
+        plan_tasks = max(
+            (_int_field(summary.get("plan_tasks")) for summary in summary_list),
+            default=0,
+        )
+    if not plan_tasks:
+        plan_tasks = len(tasks)
+
+    source_type_counts: Counter[str] = Counter()
+    repository_counts: Counter[str] = Counter()
+    for record in record_list:
+        source_type_counts[_source_type(record)] += 1
+        repository_counts[_repository(record)] += 1
+
+    selected_task_indexes: set[int] = set()
+    outcomes_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    candidate_issues: list[str] = []
+    blocking_issues: list[str] = []
+    fallback_selected_tasks = 0
+    fallback_processed_tasks = 0
+    fallback_skipped_tasks = 0
+    fallback_duplicate_records = 0
+    fallback_skipped_records = 0
+
+    for summary in summary_list:
+        task_offset = _int_field(summary.get("task_offset"))
+        selected_tasks = _int_field(summary.get("selected_tasks"))
+        if selected_tasks:
+            fallback_selected_tasks += selected_tasks
+            selected_task_indexes.update(range(task_offset, task_offset + selected_tasks))
+        fallback_processed_tasks += _int_field(summary.get("processed_tasks"))
+        fallback_skipped_tasks += _int_field(summary.get("skipped_tasks"))
+        fallback_duplicate_records += _int_field(summary.get("duplicate_records"))
+        fallback_skipped_records += _int_field(summary.get("skipped_records"))
+        candidate_issues.extend(_summary_issue_messages(summary.get("issues")))
+        blocking_issues.extend(_string_list(summary.get("blocking_issues")))
+        for outcome in _summary_task_outcomes(summary, tasks):
+            task_index = _int_field(outcome.get("task_index"), default=-1)
+            if task_index >= 0:
+                selected_task_indexes.add(task_index)
+                key = ("index", str(task_index))
+            else:
+                key = ("id", _text(outcome.get("task_id")))
+            if key[1]:
+                outcomes_by_key[key] = outcome
+
+    task_outcomes = sorted(outcomes_by_key.values(), key=_task_outcome_sort_key)
+    processed_tasks = sum(
+        1
+        for outcome in task_outcomes
+        if _normalize_label(outcome.get("status")) in {"processed", "failed"}
+    )
+    skipped_tasks = sum(
+        1
+        for outcome in task_outcomes
+        if _normalize_label(outcome.get("status")).startswith("skipped")
+    )
+    duplicate_records = sum(
+        _int_field(outcome.get("duplicate_records")) for outcome in task_outcomes
+    )
+    skipped_records = sum(_int_field(outcome.get("skipped_records")) for outcome in task_outcomes)
+    if not task_outcomes:
+        processed_tasks = fallback_processed_tasks
+        skipped_tasks = fallback_skipped_tasks
+        duplicate_records = fallback_duplicate_records
+        skipped_records = fallback_skipped_records
+
+    final_processed_task_ids = {
+        _text(outcome.get("task_id"))
+        for outcome in task_outcomes
+        if _normalize_label(outcome.get("status")) == "processed"
+    }
+    issues: list[str] = []
+    for issue in candidate_issues:
+        task_id = issue.split(":", 1)[0].strip()
+        if task_id and task_id in final_processed_task_ids:
+            continue
+        issues.append(issue)
+    for outcome in task_outcomes:
+        if _normalize_label(outcome.get("status")) == "failed":
+            issue = _text(outcome.get("issue"))
+            if issue:
+                issues.append(issue)
+
+    summary_allow_partial = allow_partial or any(
+        bool(summary.get("allow_partial")) for summary in summary_list
+    )
+    selected_tasks = len(selected_task_indexes) if selected_task_indexes else fallback_selected_tasks
+    return SourceExportSummary(
+        plan_tasks=plan_tasks,
+        task_offset=0,
+        max_tasks=None,
+        selected_tasks=selected_tasks,
+        processed_tasks=processed_tasks,
+        exported=len(record_list),
+        new_records=len(record_list),
+        existing_records=0,
+        duplicate_records=duplicate_records,
+        skipped_tasks=skipped_tasks,
+        skipped_records=skipped_records,
+        allow_partial=summary_allow_partial,
+        output_path=str(output_path),
+        source_type_counts=dict(sorted(source_type_counts.items())),
+        repository_counts=dict(sorted(repository_counts.items())),
+        issues=_unique_strings(issues),
+        blocking_issues=_unique_strings(blocking_issues),
+        task_outcomes=task_outcomes,
+    )
+
+
 def summarize_source_collection_readiness(
     collection_plan: dict[str, Any],
     export_summary: dict[str, Any],
@@ -925,6 +1059,87 @@ def _source_task_outcome(task: dict[str, Any], task_index: int) -> dict[str, Any
         "skipped_records": 0,
         "issue": "",
     }
+
+
+def _summary_task_outcomes(
+    summary: dict[str, Any],
+    tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    outcomes = []
+    task_outcomes = summary.get("task_outcomes")
+    if isinstance(task_outcomes, list):
+        outcomes.extend(
+            _normalize_summary_task_outcome(outcome, tasks)
+            for outcome in task_outcomes
+            if isinstance(outcome, dict)
+        )
+    attempts = summary.get("attempts")
+    if isinstance(attempts, list):
+        outcomes.extend(
+            _normalize_summary_task_outcome(attempt, tasks)
+            for attempt in attempts
+            if isinstance(attempt, dict)
+        )
+    return outcomes
+
+
+def _normalize_summary_task_outcome(
+    raw_outcome: dict[str, Any],
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    task_index = _int_field(raw_outcome.get("task_index"), default=-1)
+    task = tasks[task_index] if 0 <= task_index < len(tasks) else {}
+    issue = _text(raw_outcome.get("issue"))
+    status = _normalize_label(raw_outcome.get("status"))
+    if status not in {"processed", "failed", "skipped", "skipped_unsupported"}:
+        status = "failed" if issue else "processed"
+    task_id = _text(raw_outcome.get("task_id")) or _text(task.get("task_id"))
+    return {
+        "task_id": task_id,
+        "task_index": task_index,
+        "repository": _text(raw_outcome.get("repository")) or _repository(task),
+        "collection_source": _normalize_label(raw_outcome.get("collection_source"))
+        or _normalize_label(task.get("collection_source")),
+        "status": status,
+        "new_records": _int_field(raw_outcome.get("new_records")),
+        "duplicate_records": _int_field(raw_outcome.get("duplicate_records")),
+        "skipped_records": _int_field(raw_outcome.get("skipped_records")),
+        "issue": issue,
+    }
+
+
+def _task_outcome_sort_key(outcome: dict[str, Any]) -> tuple[int, str]:
+    task_index = _int_field(outcome.get("task_index"), default=10**9)
+    if task_index < 0:
+        task_index = 10**9
+    return (task_index, _text(outcome.get("task_id")))
+
+
+def _summary_issue_messages(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    messages = []
+    for item in value:
+        if isinstance(item, str):
+            message = item.strip()
+        elif isinstance(item, dict):
+            message = _text(item.get("message") or item.get("issue"))
+        else:
+            message = _text(item)
+        if message:
+            messages.append(message)
+    return messages
+
+
+def _unique_strings(values: Iterable[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = _text(value)
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def _github_token_issue(github_token_env: str) -> str:
