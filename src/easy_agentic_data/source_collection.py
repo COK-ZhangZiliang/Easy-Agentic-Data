@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import urllib.parse
+import urllib.request
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -66,6 +69,29 @@ class SourceCollectionAudit:
         return value
 
 
+@dataclass
+class SourceExportSummary:
+    """Summary of public source records exported from a collection plan."""
+
+    plan_tasks: int = 0
+    exported: int = 0
+    skipped_tasks: int = 0
+    skipped_records: int = 0
+    output_path: str = ""
+    source_type_counts: dict[str, int] = field(default_factory=dict)
+    repository_counts: dict[str, int] = field(default_factory=dict)
+    issues: list[str] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return self.exported > 0 and not self.issues
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        return value
+
+
 def build_source_collection_plan(
     allowlist_records: Iterable[dict[str, Any]],
     *,
@@ -119,6 +145,70 @@ def build_source_collection_plan(
         "total_tasks": len(tasks),
         "valid": allowlist_audit.valid and bool(tasks),
     }
+
+
+def export_public_source_records(
+    collection_plan: dict[str, Any],
+    *,
+    output_path: str | Path,
+    limit_per_task: int = 10,
+    fixture_root: str | Path | None = None,
+    github_token_env: str = "",
+    timeout_seconds: float = 30.0,
+) -> SourceExportSummary:
+    """Export public issue/PR records from a collection plan into JSONL."""
+
+    tasks = list(collection_plan.get("tasks", []))
+    output = Path(output_path)
+    client: _SourceClient
+    if fixture_root:
+        client = _FixtureSourceClient(Path(fixture_root))
+    else:
+        client = _GitHubSourceClient(
+            token=os.environ.get(github_token_env, "") if github_token_env else "",
+            timeout_seconds=timeout_seconds,
+        )
+    records: list[dict[str, Any]] = []
+    issues: list[str] = []
+    source_type_counts: Counter[str] = Counter()
+    repository_counts: Counter[str] = Counter()
+    skipped_tasks = 0
+    skipped_records = 0
+
+    for task in tasks:
+        collection_source = _normalize_label(task.get("collection_source"))
+        if collection_source not in {"issues", "pull_requests"}:
+            skipped_tasks += 1
+            continue
+        try:
+            exported, skipped = _export_task_records(
+                task,
+                client=client,
+                limit=max(0, limit_per_task),
+            )
+        except Exception as exc:
+            issues.append(f"{task.get('task_id', '<unknown>')}: {exc}")
+            continue
+        skipped_records += skipped
+        records.extend(exported)
+        for record in exported:
+            source_type_counts[_source_type(record)] += 1
+            repository_counts[_repository(record)] += 1
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    return SourceExportSummary(
+        plan_tasks=len(tasks),
+        exported=len(records),
+        skipped_tasks=skipped_tasks,
+        skipped_records=skipped_records,
+        output_path=str(output),
+        source_type_counts=dict(sorted(source_type_counts.items())),
+        repository_counts=dict(sorted(repository_counts.items())),
+        issues=issues,
+    )
 
 
 def audit_public_source_records(
@@ -185,6 +275,268 @@ def audit_public_source_records(
         allowlist_filter=allowlist_summary.to_dict(),
         issues=issues,
     )
+
+
+def _export_task_records(
+    task: dict[str, Any],
+    *,
+    client: "_SourceClient",
+    limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    if limit <= 0:
+        return [], 0
+    collection_source = _normalize_label(task.get("collection_source"))
+    if collection_source == "issues":
+        raw_records = [
+            item
+            for item in client.issues(task, limit=limit)
+            if not isinstance(item.get("pull_request"), dict)
+        ][:limit]
+    elif collection_source == "pull_requests":
+        raw_records = client.pull_requests(task, limit=limit)[:limit]
+    else:
+        return [], 0
+    records = []
+    skipped = 0
+    for raw_record in raw_records:
+        record = _normalize_exported_record(
+            task,
+            raw_record,
+            source_type="pull_request" if collection_source == "pull_requests" else "issue",
+            client=client,
+        )
+        if _export_record_ready(record):
+            records.append(record)
+        else:
+            skipped += 1
+    return records, skipped
+
+
+def _normalize_exported_record(
+    task: dict[str, Any],
+    raw_record: dict[str, Any],
+    *,
+    source_type: str,
+    client: "_SourceClient",
+) -> dict[str, Any]:
+    repository = _repository(task)
+    number = int(raw_record.get("number") or 0)
+    if number <= 0:
+        raise ValueError(f"record from {repository} is missing a positive number")
+    labels = _label_names(raw_record.get("labels")) or _list_field(task.get("labels"))
+    stable_commands = _list_field(task.get("stable_commands"))
+    source_revision = _source_revision_for_record(
+        task,
+        raw_record,
+        source_type=source_type,
+        client=client,
+    )
+    source_instance_id = (
+        f"{repository.replace('/', '__')}-"
+        f"{'pr' if source_type == 'pull_request' else 'issue'}-{number}"
+    )
+    return {
+        "id": source_instance_id,
+        "type": "pull_request" if source_type == "pull_request" else "issue",
+        "repository": repository,
+        "source_uri": _text(task.get("source_uri")),
+        "source_revision": source_revision,
+        "source_instance_id": source_instance_id,
+        "source_url": _text(raw_record.get("html_url")),
+        "title": _text(raw_record.get("title")),
+        "body": _text(raw_record.get("body")),
+        "labels": labels,
+        "license": _text(task.get("license")),
+        "language": _text(task.get("language")),
+        "test_commands": stable_commands,
+        "candidate_verifier": {
+            "type": "stable_commands",
+            "commands": stable_commands,
+        },
+        "collection_source": _normalize_label(task.get("collection_source")),
+        "source_name": _text(task.get("source_name")),
+    }
+
+
+def _export_record_ready(record: dict[str, Any]) -> bool:
+    return all(
+        (
+            _repository(record),
+            _text(record.get("source_uri")),
+            _fixed_sha(record.get("source_revision")),
+            _text(record.get("source_url")),
+            _text(record.get("title")),
+            _text(record.get("body")),
+            _list_field(record.get("labels")),
+            _text(record.get("license")),
+            _text(record.get("language")),
+            _has_candidate_verifier(record),
+        )
+    )
+
+
+def _source_revision_for_record(
+    task: dict[str, Any],
+    raw_record: dict[str, Any],
+    *,
+    source_type: str,
+    client: "_SourceClient",
+) -> str:
+    if source_type == "pull_request":
+        base = raw_record.get("base")
+        if isinstance(base, dict):
+            sha = _fixed_sha(base.get("sha"))
+            if sha:
+                return sha
+    task_revision = _fixed_sha(task.get("source_revision"))
+    if task_revision:
+        return task_revision
+    return client.default_branch_sha(_repository(task))
+
+
+def _label_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    labels = []
+    for item in value:
+        if isinstance(item, dict):
+            name = _text(item.get("name"))
+        else:
+            name = _text(item)
+        if name:
+            labels.append(name)
+    return labels
+
+
+def _fixed_sha(value: Any) -> str:
+    text = _text(value)
+    return text.lower() if re.fullmatch(r"[0-9a-fA-F]{40}", text) else ""
+
+
+class _SourceClient:
+    def issues(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def pull_requests(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def default_branch_sha(self, repository: str) -> str:
+        raise NotImplementedError
+
+
+class _FixtureSourceClient(_SourceClient):
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def issues(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        del limit
+        return self._records(_repository(task), "issues.json")
+
+    def pull_requests(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        del limit
+        return self._records(_repository(task), "pull_requests.json")
+
+    def default_branch_sha(self, repository: str) -> str:
+        metadata = self._payload(repository, "repository.json")
+        sha = _fixed_sha(metadata.get("default_branch_sha"))
+        if sha:
+            return sha
+        branch = _text(metadata.get("default_branch")) or "main"
+        branch_payload = self._payload(repository, f"branches/{branch}.json")
+        commit = branch_payload.get("commit")
+        if isinstance(commit, dict):
+            sha = _fixed_sha(commit.get("sha"))
+        else:
+            sha = _fixed_sha(branch_payload.get("sha"))
+        if not sha:
+            raise ValueError(f"fixture branch for {repository} is missing a fixed commit SHA")
+        return sha
+
+    def _records(self, repository: str, filename: str) -> list[dict[str, Any]]:
+        payload = self._payload(repository, filename)
+        records = payload.get("records") if isinstance(payload, dict) else payload
+        if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
+            raise ValueError(f"fixture {filename} for {repository} must contain records")
+        return list(records)
+
+    def _payload(self, repository: str, filename: str) -> Any:
+        path = self.root / repository.replace("/", "__") / filename
+        return json.loads(path.read_text(encoding="utf-8"))
+
+
+class _GitHubSourceClient(_SourceClient):
+    def __init__(self, *, token: str = "", timeout_seconds: float = 30.0) -> None:
+        self.token = token
+        self.timeout_seconds = timeout_seconds
+        self._repo_cache: dict[str, dict[str, Any]] = {}
+        self._branch_cache: dict[str, str] = {}
+
+    def issues(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        repository = _repository(task)
+        params = {
+            "state": "open",
+            "per_page": str(min(max(limit, 1), 100)),
+        }
+        payload = self._get_json(f"/repos/{repository}/issues", params=params)
+        if not isinstance(payload, list):
+            raise ValueError(f"GitHub issues response for {repository} is not a list")
+        return payload
+
+    def pull_requests(self, task: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+        repository = _repository(task)
+        params = {
+            "state": "open",
+            "per_page": str(min(max(limit, 1), 100)),
+        }
+        payload = self._get_json(f"/repos/{repository}/pulls", params=params)
+        if not isinstance(payload, list):
+            raise ValueError(f"GitHub pulls response for {repository} is not a list")
+        return payload
+
+    def default_branch_sha(self, repository: str) -> str:
+        if repository not in self._branch_cache:
+            metadata = self._repository_metadata(repository)
+            branch = _text(metadata.get("default_branch")) or "main"
+            branch_payload = self._get_json(f"/repos/{repository}/branches/{branch}")
+            commit = branch_payload.get("commit")
+            sha = _fixed_sha(commit.get("sha")) if isinstance(commit, dict) else ""
+            if not sha:
+                raise ValueError(f"GitHub branch metadata for {repository} lacks a fixed SHA")
+            self._branch_cache[repository] = sha
+        return self._branch_cache[repository]
+
+    def _repository_metadata(self, repository: str) -> dict[str, Any]:
+        if repository not in self._repo_cache:
+            payload = self._get_json(f"/repos/{repository}")
+            if not isinstance(payload, dict):
+                raise ValueError(f"GitHub repository metadata for {repository} is not an object")
+            self._repo_cache[repository] = payload
+        return self._repo_cache[repository]
+
+    def _get_json(
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> Any:
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        request = urllib.request.Request(
+            f"https://api.github.com{path}{query}",
+            headers=self._headers(),
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "easy-agentic-data-source-collection",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
 
 def _add_record_issues(

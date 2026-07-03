@@ -120,6 +120,119 @@ class SourceCollectionTests(unittest.TestCase):
             self.assertTrue(json.loads(plan_output.read_text(encoding="utf-8"))["valid"])
             self.assertTrue(json.loads(audit_output.read_text(encoding="utf-8"))["valid"])
 
+    def test_cli_collection_export_writes_auditable_public_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowlist = root / "allowlist.json"
+            plan_output = root / "plan.json"
+            export_output = root / "exports.jsonl"
+            audit_output = root / "audit.json"
+            fixture_repo = root / "fixtures" / "example__tool"
+            (fixture_repo / "branches").mkdir(parents=True)
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+            (fixture_repo / "repository.json").write_text(
+                json.dumps({"default_branch": "main"}),
+                encoding="utf-8",
+            )
+            (fixture_repo / "branches" / "main.json").write_text(
+                json.dumps({"commit": {"sha": "a" * 40}}),
+                encoding="utf-8",
+            )
+            (fixture_repo / "issues.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "number": 100,
+                            "html_url": "https://github.com/example/tool/issues/100",
+                            "title": "Fix parser whitespace handling",
+                            "body": "The parser drops significant whitespace.",
+                            "labels": [{"name": "bug"}, {"name": "parser"}],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (fixture_repo / "pull_requests.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "number": 101,
+                            "html_url": "https://github.com/example/tool/pull/101",
+                            "title": "Add parser regression coverage",
+                            "body": "This PR adds tests for quoted whitespace.",
+                            "labels": [{"name": "review"}],
+                            "base": {"sha": "b" * 40},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                plan_exit_code = main(
+                    [
+                        "registry",
+                        "collection-plan",
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(plan_output),
+                    ]
+                )
+            export_stdout = io.StringIO()
+            with redirect_stdout(export_stdout):
+                export_exit_code = main(
+                    [
+                        "registry",
+                        "collection-export",
+                        "--plan",
+                        str(plan_output),
+                        "--output",
+                        str(export_output),
+                        "--fixture-root",
+                        str(root / "fixtures"),
+                        "--limit-per-task",
+                        "1",
+                    ]
+                )
+            with redirect_stdout(io.StringIO()):
+                audit_exit_code = main(
+                    [
+                        "registry",
+                        "collection-audit",
+                        "--source",
+                        str(export_output),
+                        "--allowlist",
+                        str(allowlist),
+                        "--output",
+                        str(audit_output),
+                    ]
+                )
+
+            exported_records = [
+                json.loads(line) for line in export_output.read_text(encoding="utf-8").splitlines()
+            ]
+            export_summary = json.loads(export_stdout.getvalue())
+            audit = json.loads(audit_output.read_text(encoding="utf-8"))
+            self.assertEqual(plan_exit_code, 0)
+            self.assertEqual(export_exit_code, 0)
+            self.assertEqual(audit_exit_code, 0)
+            self.assertEqual(export_summary["exported"], 2)
+            self.assertEqual(
+                export_summary["source_type_counts"],
+                {"public_issue": 1, "public_pr": 1},
+            )
+            self.assertEqual(audit["accepted"], 2)
+            self.assertEqual(audit["quarantined"], 0)
+            self.assertEqual(
+                {record["source_revision"] for record in exported_records},
+                {"a" * 40, "b" * 40},
+            )
+            self.assertTrue(all(record["candidate_verifier"] for record in exported_records))
+
 
 def _allowlist_record() -> dict[str, object]:
     return {

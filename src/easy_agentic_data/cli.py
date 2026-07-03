@@ -86,6 +86,7 @@ from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
     build_source_collection_plan,
+    export_public_source_records,
 )
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
@@ -294,6 +295,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_plan_parser.add_argument("--output", default="")
     collection_plan_parser.add_argument("--output-root", default="runs/source-exports")
     collection_plan_parser.add_argument("--source-name", default="curated-public-sources")
+    collection_export_parser = registry_subparsers.add_parser("collection-export")
+    collection_export_parser.add_argument("--plan", required=True)
+    collection_export_parser.add_argument("--output", required=True)
+    collection_export_parser.add_argument("--limit-per-task", type=int, default=10)
+    collection_export_parser.add_argument("--fixture-root", default="")
+    collection_export_parser.add_argument("--github-token-env", default="")
+    collection_export_parser.add_argument("--timeout-seconds", type=float, default=30.0)
     collection_audit_parser = registry_subparsers.add_parser("collection-audit")
     collection_audit_parser.add_argument("--source", required=True)
     collection_audit_parser.add_argument("--allowlist", required=True)
@@ -623,6 +631,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(plan, indent=2, sort_keys=True))
             return 0 if plan["valid"] else 2
+        if args.registry_command == "collection-export":
+            plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+            summary = export_public_source_records(
+                plan,
+                output_path=args.output,
+                limit_per_task=args.limit_per_task,
+                fixture_root=args.fixture_root or None,
+                github_token_env=args.github_token_env,
+                timeout_seconds=args.timeout_seconds,
+            )
+            payload = summary.to_dict()
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if summary.valid else 2
         if args.registry_command == "collection-audit":
             audit = audit_public_source_records(
                 load_source_records(args.source),

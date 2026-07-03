@@ -82,6 +82,8 @@ The first production-capable release must:
   import
 - [x] First production seed-corpus policy and 10-repository allowlist candidate files with static
   coverage gates, repository-share readiness, and collection-plan validation
+- [x] Public issue/PR source export command that turns a collection plan into auditable JSONL
+  records
 - [x] Registry-backed smoke rollout coverage for every supported task family in
   `tests/test_seed_library_rollouts.py`
 
@@ -422,6 +424,7 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   targets, and maximum repository/source shares before collecting data.
 - [x] Build a repository allowlist from permissively licensed, active public repositories with
   reproducible Git history, stable test commands, and no benchmark overlap.
+- [x] Add an automated public issue/PR export path from collection plans to auditable source JSONL.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -459,8 +462,11 @@ Current checkpoint:
 - This checkpoint is not production approval. Ten repositories satisfy the first repository-share
   threshold for a 1,000-seed corpus, but the allowlist is still Python-only, exported public records
   have not yet been collected, and `scale_decision.approved` remains false.
-- The next executable gate is to run allowlist audit and collection-plan generation for the
-  candidate allowlist, then collect real public source exports before registry import.
+- `registry collection-export` now turns issue and pull-request collection-plan tasks into
+  normalized public source JSONL. It supports fixture-backed tests and GitHub API collection, while
+  CI collection tasks remain planned but skipped until a CI-specific record contract is added.
+- The next executable gate is to run `collection-export` against the production collection plan,
+  then run `collection-audit` before registry import.
 
 1. **Corpus budget and source policy**
    - Define the initial scale target, minimum count per supported task family, required verifier
