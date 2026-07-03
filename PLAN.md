@@ -474,6 +474,31 @@ Current checkpoint:
 - The next executable gate is to run all production issue/PR shards with `collection-export`, then
   run `collection-audit` before registry import.
 
+Next milestone plan:
+
+| Milestone | Inputs | Actions | Outputs | Exit gate |
+| --- | --- | --- | --- | --- |
+| P7.1 Source collection readiness | Production policy, repository allowlist, collection plan, export summaries, and collection audit outputs | Run all issue/PR export shards, resume rate-limited shards, audit exported records, and summarize accepted, quarantined, skipped, duplicate, and failed tasks | Public source JSONL, export summary JSON, collection audit JSON, readiness summary JSON | Accepted source records meet the configured minimum, quarantine count is within budget, required source types are present, and all unresolved export failures are explicitly listed |
+| P7.2 Registry import rehearsal | Audited public source JSONL, repository allowlist, fixed-revision rules, and license allowlist | Import records into a temporary train registry, reject records outside the allowlist, verify fixed commits, and run registry validation before creating scenarios | Temporary train registry, import manifest, rejected-record report, registry validation output | Every accepted seed has a stable `task_id`, fixed source revision, license-compatible provenance, train eligibility, contamination tags, task family, source method, verifier types, and coverage tags |
+| P7.3 Synthetic coverage backfill | Seed-audit gaps from the import rehearsal and fixed repository snapshots | Generate repository-grounded synthetic tasks only for missing families, verifier types, languages, or difficulty bands; keep synthetic records separated by `source_method` | Synthetic source specs, generated train registry records, verifier-evidence report | Synthetic seeds improve audited coverage without replacing required real-source records or satisfying verifier requirements they do not actually exercise |
+| P7.4 Holdout and decontamination | Benchmark registries, curated non-train sources, hidden evaluator metadata, and train registry candidates | Build the holdout registry, run seed and scenario audits, compare normalized prompts, provenance, source instances, hidden tests, reference artifacts, oracle hashes, and patch/test-patch hashes | Holdout registry, seed decontamination report, scenario decontamination report, quarantine report | No trainable scenario overlaps held-out evaluator oracles; every contamination hit is removed, relabeled non-train, or quarantined with an explicit reason |
+| P7.5 Human-review queue | Candidate train registry, coverage audit, decontamination reports, and review sampling policy | Sample by task family, source method, difficulty, verifier type, repository, and language; present public query, provenance, verifier evidence, and risk checklist for review | Stratified review JSONL, reviewer decision summary, follow-up quarantine list | Reviewer decisions approve the sampled strata or quarantine every actionable source-quality, leakage, privacy, or verifier issue before provider spend increases |
+| P7.6 Pilot rollout | Approved train registry slice, frozen prompt/config versions, DeepSeek V4 Pro provider config, and shard budget | Run a small registry-backed pilot across all supported task families, then inspect trace validity, tool success, reward distribution, hard-check failures, prompt leakage, and cost | Pilot traces, batch quality report, trace-logic audit, cost report, scale-readiness summary | Pilot quality and cost meet configured thresholds, hard verifier failures are not hidden by soft scores, and failures are assigned to task, model, verifier, or infrastructure categories |
+| P7.7 Frozen corpus manifest | Final train registry, holdout registry, audit outputs, review outputs, pilot outputs, provider settings, and scale decision | Freeze all source snapshots, registry roots, prompt/config versions, audit paths, review decisions, pilot selection, and scale approval in one manifest | Versioned seed-corpus manifest and scale decision artifact | Larger shards can only launch from this immutable manifest; any source, prompt, verifier, or registry change creates a new manifest version |
+
+Operational sequencing:
+
+1. Complete public source collection before adding synthetic backfill so coverage gaps are measured
+   against real non-benchmark evidence rather than assumed from the policy target.
+2. Run import rehearsal before any paid rollout so malformed records, mutable revisions, license
+   issues, and verifier-evidence gaps fail locally.
+3. Build the holdout registry before scale-up so benchmark and curated evaluation sources remain
+   useful for downstream quality measurement.
+4. Treat anonymous API rate limits, skipped CI tasks, and partial exports as visible readiness
+   issues rather than silent success.
+5. Keep every generated source, registry, review, pilot, and manifest artifact under `runs/` or an
+   explicitly configured external data root; do not commit production data outputs.
+
 1. **Corpus budget and source policy**
    - Define the initial scale target, minimum count per supported task family, required verifier
      types, language quotas, maximum repository share, maximum source-method share, and minimum
@@ -651,3 +676,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-01 | Added a reusable trace-logic audit CLI for reviewing coherence, completion, and multi-step complexity before continuing scale-up. |
 | 2026-07-01 | Wired trace-logic audit metrics into scale candidate selection and prepared an audit-strict DeepSeek V4 Pro scale queue. |
 | 2026-07-01 | Added a scale-readiness summary CLI to combine candidate selection, cost estimate, shard status, trace audit, and continuation gates. |
+| 2026-07-03 | Expanded the P7 production seed-corpus plan with milestone-level inputs, actions, outputs, and exit gates. |
