@@ -90,6 +90,7 @@ from easy_agentic_data.source_collection import (
     build_source_collection_retry_plan,
     build_source_collection_plan,
     export_public_source_records,
+    run_source_collection_retry_plan,
     split_public_source_records,
     summarize_source_collection_readiness,
 )
@@ -377,6 +378,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Only plan retries for tasks inside the export summary's selected shard",
     )
+    collection_retry_run_parser = registry_subparsers.add_parser("collection-retry-run")
+    collection_retry_run_parser.add_argument("--plan", required=True)
+    collection_retry_run_parser.add_argument("--retry-plan", required=True)
+    collection_retry_run_parser.add_argument("--output", required=True)
+    collection_retry_run_parser.add_argument("--summary-output", default="")
+    collection_retry_run_parser.add_argument("--limit-per-task", type=int, default=10)
+    collection_retry_run_parser.add_argument("--max-retry-tasks", type=int)
+    collection_retry_run_parser.add_argument("--sleep-seconds", type=float, default=0.0)
+    collection_retry_run_parser.add_argument("--fixture-root", default="")
+    collection_retry_run_parser.add_argument("--github-token-env", default="")
+    collection_retry_run_parser.add_argument("--require-github-token", action="store_true")
+    collection_retry_run_parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    collection_retry_run_parser.add_argument("--allow-partial", action="store_true")
     collection_split_parser = registry_subparsers.add_parser("collection-split")
     collection_split_parser.add_argument("--source", required=True)
     collection_split_parser.add_argument("--output", required=True)
@@ -763,6 +777,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if retry_plan.valid else 2
+        if args.registry_command == "collection-retry-run":
+            summary = run_source_collection_retry_plan(
+                json.loads(Path(args.plan).read_text(encoding="utf-8")),
+                json.loads(Path(args.retry_plan).read_text(encoding="utf-8")),
+                output_path=args.output,
+                limit_per_task=args.limit_per_task,
+                max_retry_tasks=args.max_retry_tasks,
+                sleep_seconds=args.sleep_seconds,
+                fixture_root=args.fixture_root or None,
+                github_token_env=args.github_token_env,
+                require_github_token=args.require_github_token,
+                timeout_seconds=args.timeout_seconds,
+                allow_partial=args.allow_partial,
+            )
+            payload = summary.to_dict()
+            if args.summary_output:
+                Path(args.summary_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.summary_output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if summary.valid else 2
         if args.registry_command == "collection-split":
             summary = split_public_source_records(
                 load_source_records(args.source),

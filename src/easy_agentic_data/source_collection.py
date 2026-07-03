@@ -214,6 +214,48 @@ class SourceCollectionRetryPlan:
         return value
 
 
+@dataclass
+class SourceCollectionRetryRunSummary:
+    """Execution summary for retrying source-collection tasks."""
+
+    retry_tasks: int = 0
+    selected_retry_tasks: int = 0
+    attempted_tasks: int = 0
+    completed_tasks: int = 0
+    failed_tasks: int = 0
+    skipped_tasks: int = 0
+    new_records: int = 0
+    duplicate_records: int = 0
+    skipped_records: int = 0
+    allow_partial: bool = False
+    output_path: str = ""
+    blocking_issues: list[str] = field(default_factory=list)
+    issues: list[SourceCollectionIssue] = field(default_factory=list)
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        if self.blocking_issues or any(issue.severity == "error" for issue in self.issues):
+            return False
+        if self.selected_retry_tasks == 0:
+            return True
+        return self.completed_tasks > 0 and (self.allow_partial or self.failed_tasks == 0)
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.valid
+            and self.failed_tasks == 0
+            and self.attempted_tasks == self.selected_retry_tasks
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["valid"] = self.valid
+        value["complete"] = self.complete
+        return value
+
+
 def build_source_collection_plan(
     allowlist_records: Iterable[dict[str, Any]],
     *,
@@ -518,6 +560,100 @@ def build_source_collection_retry_plan(
         reason_counts=dict(sorted(reason_counts.items())),
         retry_tasks=retry_tasks,
         issues=issues,
+    )
+
+
+def run_source_collection_retry_plan(
+    collection_plan: dict[str, Any],
+    retry_plan: dict[str, Any],
+    *,
+    output_path: str | Path,
+    limit_per_task: int = 10,
+    max_retry_tasks: int | None = None,
+    sleep_seconds: float = 0.0,
+    fixture_root: str | Path | None = None,
+    github_token_env: str = "",
+    require_github_token: bool = False,
+    timeout_seconds: float = 30.0,
+    allow_partial: bool = False,
+) -> SourceCollectionRetryRunSummary:
+    """Execute retry-plan tasks as resumable single-task source exports."""
+
+    retry_tasks = _retry_tasks(retry_plan)
+    selected_retry_tasks = retry_tasks
+    if max_retry_tasks is not None:
+        selected_retry_tasks = retry_tasks[: max(0, max_retry_tasks)]
+    output = Path(output_path)
+    if not fixture_root and require_github_token:
+        token_issue = _github_token_issue(github_token_env)
+        if token_issue:
+            return SourceCollectionRetryRunSummary(
+                retry_tasks=len(retry_tasks),
+                selected_retry_tasks=len(selected_retry_tasks),
+                allow_partial=allow_partial,
+                output_path=str(output),
+                blocking_issues=[token_issue],
+            )
+
+    attempts: list[dict[str, Any]] = []
+    issues: list[SourceCollectionIssue] = []
+    completed_tasks = 0
+    failed_tasks = 0
+    skipped_tasks = 0
+    new_records = 0
+    duplicate_records = 0
+    skipped_records = 0
+    for retry_task in selected_retry_tasks:
+        task_index = _int_field(retry_task.get("task_index"), default=-1)
+        if task_index < 0:
+            skipped_tasks += 1
+            issue = SourceCollectionIssue(
+                code="invalid_retry_task_index",
+                message="Retry task is missing a non-negative task_index",
+                source_instance_id=_text(retry_task.get("task_id")),
+            )
+            issues.append(issue)
+            attempts.append(_retry_attempt(retry_task, status="skipped", issue=issue.message))
+            continue
+        export_summary = export_public_source_records(
+            collection_plan,
+            output_path=output,
+            limit_per_task=limit_per_task,
+            task_offset=task_index,
+            max_tasks=1,
+            sleep_seconds=0.0,
+            resume=True,
+            allow_partial=allow_partial,
+            fixture_root=fixture_root,
+            github_token_env=github_token_env,
+            require_github_token=require_github_token,
+            timeout_seconds=timeout_seconds,
+        )
+        task_attempt = _retry_attempt_from_export(retry_task, export_summary)
+        attempts.append(task_attempt)
+        new_records += _int_field(task_attempt.get("new_records"))
+        duplicate_records += _int_field(task_attempt.get("duplicate_records"))
+        skipped_records += _int_field(task_attempt.get("skipped_records"))
+        if export_summary.blocking_issues or export_summary.issues:
+            failed_tasks += 1
+        else:
+            completed_tasks += 1
+        _sleep_between_tasks(len(attempts) - 1, selected_retry_tasks, sleep_seconds)
+
+    return SourceCollectionRetryRunSummary(
+        retry_tasks=len(retry_tasks),
+        selected_retry_tasks=len(selected_retry_tasks),
+        attempted_tasks=len(attempts),
+        completed_tasks=completed_tasks,
+        failed_tasks=failed_tasks,
+        skipped_tasks=skipped_tasks,
+        new_records=new_records,
+        duplicate_records=duplicate_records,
+        skipped_records=skipped_records,
+        allow_partial=allow_partial,
+        output_path=str(output),
+        issues=issues,
+        attempts=attempts,
     )
 
 
@@ -839,6 +975,51 @@ def _append_retry_task(
         }
     )
     assigned.add(task_index)
+
+
+def _retry_tasks(retry_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    value = retry_plan.get("retry_tasks")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _retry_attempt(
+    retry_task: dict[str, Any],
+    *,
+    status: str,
+    issue: str = "",
+    new_records: int = 0,
+    duplicate_records: int = 0,
+    skipped_records: int = 0,
+) -> dict[str, Any]:
+    return {
+        "task_id": _text(retry_task.get("task_id")),
+        "task_index": _int_field(retry_task.get("task_index"), default=-1),
+        "repository": _text(retry_task.get("repository")),
+        "collection_source": _normalize_label(retry_task.get("collection_source")),
+        "status": status,
+        "issue": issue,
+        "new_records": new_records,
+        "duplicate_records": duplicate_records,
+        "skipped_records": skipped_records,
+    }
+
+
+def _retry_attempt_from_export(
+    retry_task: dict[str, Any],
+    export_summary: SourceExportSummary,
+) -> dict[str, Any]:
+    issue = "; ".join([*export_summary.blocking_issues, *export_summary.issues])
+    status = "failed" if issue else "processed"
+    return _retry_attempt(
+        retry_task,
+        status=status,
+        issue=issue,
+        new_records=export_summary.new_records,
+        duplicate_records=export_summary.duplicate_records,
+        skipped_records=export_summary.skipped_records,
+    )
 
 
 def _selected_tasks(

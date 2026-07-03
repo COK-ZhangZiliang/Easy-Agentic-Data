@@ -450,6 +450,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   unselected source-collection tasks to explicit retry shards.
 - [x] Add a production collection authentication gate so `collection-export` can require a
   configured GitHub token before making network requests.
+- [x] Add a retry-run gate that consumes collection retry plans and executes single-task retry
+  shards against the shared source JSONL with resume behavior.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -496,6 +498,9 @@ Current checkpoint:
 - New export summaries include per-task outcomes, and `registry collection-retry-plan` turns
   failed, skipped, and unselected source-collection tasks into exact retry shards with task IDs,
   repositories, source types, and `--task-offset N --max-tasks 1` arguments.
+- `registry collection-retry-run` can now consume those retry plans and execute selected retry
+  tasks against the shared source JSONL with resume enabled, producing a retry-run summary for
+  follow-up audit and readiness decisions.
 - Production `collection-export` runs can now use `--require-github-token` with
   `--github-token-env GITHUB_TOKEN` to fail locally when authenticated collection is not
   configured, instead of silently falling back to anonymous GitHub API limits.
@@ -560,6 +565,8 @@ Immediate next execution plan:
      authentication fails before any anonymous GitHub API request is made.
    - Run `collection-retry-plan` after every shard or combined summary so failed, skipped, and
      not-yet-selected tasks are assigned to explicit single-task retry shards.
+   - Run `collection-retry-run` over selected retry tasks so incomplete shards can be resumed from
+     machine-readable retry metadata instead of hand-copied command fragments.
    - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
    - Exit gate: all 30 current plan tasks are processed without unresolved HTTP errors, or every
      remaining failure is assigned to a retry shard with the exact task ID and repository.
@@ -800,3 +807,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a source-record split gate for issue/PR and CI import-rehearsal shards. |
 | 2026-07-03 | Added per-task source export outcomes and retry planning for incomplete collection shards. |
 | 2026-07-03 | Added a GitHub token requirement gate for production source collection exports. |
+| 2026-07-03 | Added a collection retry runner that executes retry-plan tasks as resumable single-task shards. |

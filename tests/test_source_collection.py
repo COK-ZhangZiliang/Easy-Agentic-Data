@@ -642,6 +642,136 @@ class SourceCollectionTests(unittest.TestCase):
                 {"not_selected": 1, "skipped_or_unverified": 1},
             )
 
+    def test_cli_collection_retry_run_executes_retry_plan_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "plan.json"
+            retry_plan_output = root / "retry.json"
+            export_output = root / "exports.jsonl"
+            summary_output = root / "retry-run.json"
+            _write_fixture_source(root / "fixtures", include_pull_requests=True)
+            plan = build_source_collection_plan(
+                [_allowlist_record()],
+                output_root=root / "exports",
+                source_name="curated-public-sources",
+            )
+            plan_output.write_text(json.dumps(plan), encoding="utf-8")
+            retry_plan_output.write_text(
+                json.dumps(
+                    {
+                        "retry_tasks": [
+                            {
+                                "task_id": task["task_id"],
+                                "task_index": index,
+                                "repository": task["repository"],
+                                "collection_source": task["collection_source"],
+                            }
+                            for index, task in enumerate(plan["tasks"])
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "registry",
+                        "collection-retry-run",
+                        "--plan",
+                        str(plan_output),
+                        "--retry-plan",
+                        str(retry_plan_output),
+                        "--output",
+                        str(export_output),
+                        "--summary-output",
+                        str(summary_output),
+                        "--fixture-root",
+                        str(root / "fixtures"),
+                        "--limit-per-task",
+                        "1",
+                    ]
+                )
+
+            records = [
+                json.loads(line) for line in export_output.read_text(encoding="utf-8").splitlines()
+            ]
+            summary = json.loads(summary_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(summary["complete"])
+            self.assertEqual(summary["attempted_tasks"], 2)
+            self.assertEqual(summary["completed_tasks"], 2)
+            self.assertEqual(summary["failed_tasks"], 0)
+            self.assertEqual(summary["new_records"], 2)
+            self.assertEqual(
+                [attempt["status"] for attempt in summary["attempts"]],
+                ["processed", "processed"],
+            )
+            self.assertEqual([record["type"] for record in records], ["issue", "pull_request"])
+
+    def test_cli_collection_retry_run_requires_github_token_when_requested(self) -> None:
+        env_name = "EAD_TEST_MISSING_GITHUB_TOKEN"
+        old_value = os.environ.pop(env_name, None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan_output = root / "plan.json"
+                retry_plan_output = root / "retry.json"
+                export_output = root / "exports.jsonl"
+                summary_output = root / "retry-run.json"
+                plan = build_source_collection_plan(
+                    [_allowlist_record()],
+                    output_root=root / "exports",
+                    source_name="curated-public-sources",
+                )
+                plan_output.write_text(json.dumps(plan), encoding="utf-8")
+                retry_plan_output.write_text(
+                    json.dumps(
+                        {
+                            "retry_tasks": [
+                                {
+                                    "task_id": plan["tasks"][0]["task_id"],
+                                    "task_index": 0,
+                                    "repository": "example/tool",
+                                    "collection_source": "issues",
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                with redirect_stdout(io.StringIO()):
+                    exit_code = main(
+                        [
+                            "registry",
+                            "collection-retry-run",
+                            "--plan",
+                            str(plan_output),
+                            "--retry-plan",
+                            str(retry_plan_output),
+                            "--output",
+                            str(export_output),
+                            "--summary-output",
+                            str(summary_output),
+                            "--github-token-env",
+                            env_name,
+                            "--require-github-token",
+                        ]
+                    )
+
+                summary = json.loads(summary_output.read_text(encoding="utf-8"))
+                self.assertEqual(exit_code, 2)
+                self.assertFalse(summary["valid"])
+                self.assertEqual(
+                    summary["blocking_issues"],
+                    [f"missing_github_token: environment variable {env_name} is not set"],
+                )
+                self.assertFalse(export_output.exists())
+        finally:
+            if old_value is not None:
+                os.environ[env_name] = old_value
+
     def test_cli_collection_split_routes_mixed_records_by_source_type(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
