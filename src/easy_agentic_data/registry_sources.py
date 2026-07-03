@@ -29,8 +29,10 @@ SUPPORTED_SOURCE_FORMATS = {
     "public_issue",
     "public_pr",
     "public_issue_pr",
+    "public_ci",
 }
 PUBLIC_ISSUE_PR_FORMATS = {"public_issue", "public_pr", "public_issue_pr"}
+PUBLIC_CI_FORMATS = {"public_ci"}
 DEFAULT_TRAIN_LICENSE_ALLOWLIST = {
     "0bsd",
     "apache_2.0",
@@ -191,6 +193,66 @@ def import_public_issue_pr_records(
                 license_name=license_name,
                 permitted_use=permitted_use,
                 test_command_template=test_command_template,
+                task_family=task_family,
+                source_method=source_method,
+                train_eligible=train_eligible,
+                contamination_tags=contamination_tags,
+                coverage_tags=coverage_tags,
+                train_license_allowlist=train_license_allowlist,
+            )
+        except ValueError as exc:
+            message = f"record {index}: {exc}"
+            if strict:
+                raise ValueError(message) from exc
+            summary.skipped += 1
+            summary.issues.append(message)
+            continue
+        registry.add_scenario(scenario)
+        summary.imported += 1
+        summary.scenario_ids.append(scenario.scenario_id)
+    return summary
+
+
+def import_public_ci_records(
+    registry: ScenarioRegistry,
+    records: Iterable[dict[str, Any]],
+    *,
+    source_format: str = "public_ci",
+    source_name: str = "",
+    split: str = "train",
+    license_name: str = "",
+    permitted_use: str = "research",
+    limit: int | None = None,
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] | None = None,
+    coverage_tags: Iterable[str] | None = None,
+    train_license_allowlist: Iterable[str] = DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+    strict: bool = False,
+) -> RegistryImportSummary:
+    """Import public CI failure records with fixed workspace and CI verifier evidence."""
+
+    normalized_format = _normalize_source_format(source_format)
+    if normalized_format == "auto":
+        normalized_format = "public_ci"
+    if normalized_format not in PUBLIC_CI_FORMATS:
+        raise ValueError(f"Unsupported public CI source format: {source_format}")
+    summary = RegistryImportSummary(
+        source_format=normalized_format,
+        source_name=source_name or normalized_format,
+    )
+    for index, record in enumerate(records):
+        if limit is not None and summary.imported >= limit:
+            break
+        try:
+            scenario = scenario_from_public_ci_record(
+                record,
+                source_format=normalized_format,
+                source_name=summary.source_name,
+                split=split,
+                license_name=license_name,
+                permitted_use=permitted_use,
                 task_family=task_family,
                 source_method=source_method,
                 train_eligible=train_eligible,
@@ -376,6 +438,168 @@ def scenario_from_public_issue_pr_record(
         hidden_evaluator=evaluator,
         metadata={
             "source_adapter": "public_issue_pr",
+            "source_format": normalized_format,
+            "source_name": source_name or normalized_format,
+            "source_instance_id": instance_id,
+            "source_type": source_type,
+        },
+    )
+
+
+def scenario_from_public_ci_record(
+    record: dict[str, Any],
+    *,
+    source_format: str = "public_ci",
+    source_name: str = "",
+    split: str = "train",
+    license_name: str = "",
+    permitted_use: str = "research",
+    task_family: str = "",
+    source_method: str = "",
+    train_eligible: bool | None = None,
+    contamination_tags: Iterable[str] | None = None,
+    coverage_tags: Iterable[str] | None = None,
+    train_license_allowlist: Iterable[str] = DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+) -> Scenario:
+    """Convert a public CI failure export into a train-safe registry scenario."""
+
+    normalized_format = _normalize_source_format(source_format)
+    if normalized_format == "auto":
+        normalized_format = "public_ci"
+    if normalized_format not in PUBLIC_CI_FORMATS:
+        raise ValueError(f"Unsupported public CI source format: {source_format}")
+    source_type = _ci_source_type(record)
+    instance_id = _ci_instance_id(record)
+    query = _query_text(record)
+    repo = _repo_name(record)
+    source_uri = _workspace_source_uri(record, repo, source_name or normalized_format)
+    if not source_uri:
+        raise ValueError("public CI import requires a repository source URI")
+    revision = _fixed_source_revision(record)
+    ci_commands = _list_field(record.get("ci_commands"))
+    if not ci_commands:
+        raise ValueError("public CI import requires ci_commands verifier evidence")
+    resolved_license = license_name or _text_field(record.get("license"))
+    allowlist = _normalized_license_set(train_license_allowlist)
+    license_allowed = _license_allowed_for_train(resolved_license, allowlist)
+    default_train = default_train_eligible_for_source(
+        source_name or normalized_format,
+        normalized_format,
+    )
+    if train_eligible is True and not license_allowed:
+        raise ValueError(
+            f"license is not allowed for trainable public CI seeds: "
+            f"{resolved_license or '<missing>'}"
+        )
+    resolved_train_eligible = default_train if train_eligible is None else train_eligible
+    if not license_allowed:
+        resolved_train_eligible = False
+    resolved_task_family = (
+        _text_field(task_family).strip().lower().replace("-", "_")
+        or _text_field(record.get("task_family")).strip().lower().replace("-", "_")
+        or "ci_build"
+    )
+    resolved_source_method = (
+        _text_field(source_method).strip().lower().replace("-", "_")
+        or "public_ci_workspace"
+    )
+    command_groups = {"hidden_command": ci_commands}
+    hidden_tests = _flatten_command_groups(command_groups)
+    verifier_types = _public_verifier_types(
+        record,
+        command_groups,
+        patch="",
+        test_patch="",
+    )
+    resolved_contamination_tags = sorted(
+        set(_list_field(record.get("contamination_tags")))
+        | set(contamination_tags or [])
+        | set(benchmark_contamination_tags(source_name or normalized_format, normalized_format))
+        | (set() if license_allowed else {"license_not_allowlisted"})
+    )
+    resolved_coverage_tags = _coverage_tags(
+        record,
+        resolved_task_family,
+        normalized_format,
+        repo,
+        verifier_types,
+        coverage_tags or [],
+    )
+    source_url = _public_source_url(record)
+    seed = QuerySeed(
+        public=PublicTaskContext(
+            query=query,
+            context=_public_ci_context(record, instance_id, repo, source_url),
+            constraints=_list_field(record.get("constraints")),
+        ),
+        category=_text_field(record.get("category")) or "software_engineering",
+        difficulty=_difficulty(record),
+        provenance=f"{source_name or normalized_format}:{instance_id}",
+        license=resolved_license,
+        split=split,
+        task_family=resolved_task_family,
+        source_method=resolved_source_method,
+        train_eligible=resolved_train_eligible,
+        contamination_tags=resolved_contamination_tags,
+        verifier_types=verifier_types,
+        coverage_tags=resolved_coverage_tags,
+        metadata={
+            "source_adapter": "public_ci",
+            "source_format": normalized_format,
+            "source_name": source_name or normalized_format,
+            "source_instance_id": instance_id,
+            "source_type": source_type,
+            "permitted_use": permitted_use,
+            "repository": repo,
+            "source_url": source_url,
+        },
+    )
+    environment = EnvironmentSpec(
+        name=_environment_name(record, instance_id),
+        version=_text_field(record.get("version")) or "1",
+        description=f"Public CI failure workspace for {instance_id}.",
+        image_digest=_image_reference(record),
+        source_uri=source_uri,
+        source_revision=revision,
+        working_directory=_text_field(record.get("working_directory")) or "/workspace",
+        setup_commands=_list_field(record.get("setup_commands")),
+        capability_packs=_list_field(record.get("capability_packs")),
+        network_policy=_text_field(record.get("network_policy")) or "disabled",
+        resource_limits=_dict_field(record.get("resource_limits")),
+        health_check=_list_field(record.get("health_check")),
+        reset_strategy=_text_field(record.get("reset_strategy")) or "recreate",
+        metadata=_public_ci_environment_metadata(
+            record,
+            normalized_format,
+            source_name or normalized_format,
+            instance_id,
+            repo,
+            source_url,
+            permitted_use,
+            resolved_license,
+        ),
+    )
+    evaluator = HiddenEvaluatorContext(
+        hidden_tests=hidden_tests,
+        required_state=_dict_field(record.get("required_state")),
+        forbidden_state=_dict_field(record.get("forbidden_state")),
+        metadata={
+            "source_adapter": "public_ci",
+            "source_format": normalized_format,
+            "source_name": source_name or normalized_format,
+            "source_instance_id": instance_id,
+            "source_type": source_type,
+            "ci_commands": ci_commands,
+            "command_groups": command_groups,
+            "candidate_verifier": _dict_field(record.get("candidate_verifier")),
+        },
+    )
+    return Scenario(
+        query_seed=seed,
+        environment=environment,
+        hidden_evaluator=evaluator,
+        metadata={
+            "source_adapter": "public_ci",
             "source_format": normalized_format,
             "source_name": source_name or normalized_format,
             "source_instance_id": instance_id,
@@ -608,6 +832,43 @@ def _public_instance_id(record: dict[str, Any], source_type: str) -> str:
     return instance_id
 
 
+def _ci_source_type(record: dict[str, Any]) -> str:
+    explicit = _text_field(
+        _first_present(record, ("source_type", "record_type", "type", "kind"))
+    )
+    normalized = explicit.lower().replace("-", "_").replace(" ", "_")
+    if normalized and normalized not in {"ci", "ci_failure", "workflow_run", "public_ci"}:
+        raise ValueError(f"unsupported public CI source type: {explicit}")
+    return "public_ci"
+
+
+def _ci_instance_id(record: dict[str, Any]) -> str:
+    value = _first_present(
+        record,
+        (
+            "source_instance_id",
+            "instance_id",
+            "task_id",
+            "workflow_run_id",
+            "run_id",
+            "id",
+        ),
+    )
+    repo = _repo_name(record).replace("/", "__")
+    if value is None and repo:
+        run_number = _text_field(
+            _first_present(record, ("run_number", "number", "workflow_run_number"))
+        )
+        if run_number:
+            value = f"{repo}-ci-{run_number}"
+    if value is None:
+        value = _public_source_url(record)
+    instance_id = _text_field(value)
+    if not instance_id:
+        raise ValueError("missing public CI source instance id")
+    return instance_id
+
+
 def _public_issue_pr_context(
     record: dict[str, Any],
     instance_id: str,
@@ -622,6 +883,31 @@ def _public_issue_pr_context(
     source_url = _public_source_url(record)
     if source_url:
         context["source_url"] = source_url
+    return context
+
+
+def _public_ci_context(
+    record: dict[str, Any],
+    instance_id: str,
+    repo: str,
+    source_url: str,
+) -> dict[str, Any]:
+    context = _public_context(record, instance_id, repo)
+    context["source_type"] = "public_ci"
+    if source_url:
+        context["source_url"] = source_url
+    labels = _list_field(record.get("labels"))
+    if labels:
+        context["labels"] = labels
+    workflow_name = _text_field(record.get("workflow_name") or record.get("name"))
+    if workflow_name:
+        context["workflow_name"] = workflow_name
+    event = _text_field(record.get("event"))
+    if event:
+        context["event"] = event
+    head_branch = _text_field(record.get("head_branch"))
+    if head_branch:
+        context["head_branch"] = head_branch
     return context
 
 
@@ -818,6 +1104,37 @@ def _public_environment_metadata(
     return {key: value for key, value in metadata.items() if value != ""}
 
 
+def _public_ci_environment_metadata(
+    record: dict[str, Any],
+    source_format: str,
+    source_name: str,
+    instance_id: str,
+    repo: str,
+    source_url: str,
+    permitted_use: str,
+    license_name: str,
+) -> dict[str, Any]:
+    metadata = {
+        "source_adapter": "public_ci",
+        "source_format": source_format,
+        "source_name": source_name,
+        "source_instance_id": instance_id,
+        "source_type": "public_ci",
+        "permitted_use": permitted_use,
+        "license": license_name,
+        "source_url": source_url,
+    }
+    if repo:
+        metadata["repository"] = repo
+    language = _text_field(record.get("language"))
+    if language:
+        metadata["language"] = language
+    workflow_name = _text_field(record.get("workflow_name") or record.get("name"))
+    if workflow_name:
+        metadata["workflow_name"] = workflow_name
+    return {key: value for key, value in metadata.items() if value != ""}
+
+
 def _normalize_source_format(value: str) -> str:
     normalized = value.strip().lower().replace("-", "_")
     if normalized not in SUPPORTED_SOURCE_FORMATS:
@@ -882,6 +1199,17 @@ def _environment_name(record: dict[str, Any], instance_id: str) -> str:
 
 def _source_uri(record: dict[str, Any], repo: str, source_name: str) -> str:
     explicit = _text_field(_first_present(record, ("source_uri", "clone_url", "html_url")))
+    if explicit:
+        return explicit
+    if repo and "/" in repo and not repo.startswith("swesmith/"):
+        return f"https://github.com/{repo}.git"
+    if repo:
+        return f"dataset://{quote(source_name, safe='')}/{quote(repo, safe='/')}"
+    return ""
+
+
+def _workspace_source_uri(record: dict[str, Any], repo: str, source_name: str) -> str:
+    explicit = _text_field(_first_present(record, ("source_uri", "clone_url")))
     if explicit:
         return explicit
     if repo and "/" in repo and not repo.startswith("swesmith/"):

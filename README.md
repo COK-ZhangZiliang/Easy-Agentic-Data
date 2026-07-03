@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-170%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-175%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -148,10 +148,10 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-audit \
   --output runs/registry/seed-audit.json
 ```
 
-For trainable non-benchmark seeds, prefer local exports of public issue and PR records rather than
-benchmark rows. The importer requires a fixed 40-character source revision, records the public
-repository and license, keeps reference patches and evaluator commands hidden, and only marks a
-seed train-eligible when its license is in the permissive allowlist:
+For trainable non-benchmark seeds, prefer local exports of public issue, PR, and CI failure records
+rather than benchmark rows. The importers require a fixed 40-character source revision, record the
+public repository and license, keep evaluator commands hidden, and only mark a seed train-eligible
+when its license is in the permissive allowlist:
 
 ```bash
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
@@ -159,6 +159,14 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
   --source examples/public-issue-pr-seeds.jsonl \
   --format public-issue-pr \
   --source-name curated-public-issues \
+  --train-eligible auto \
+  --allow-train-license Apache-2.0
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
+  --root runs/train-registry \
+  --source examples/public-ci-seeds.jsonl \
+  --format public-ci \
+  --source-name curated-public-ci \
   --train-eligible auto \
   --allow-train-license Apache-2.0
 ```
@@ -284,6 +292,19 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
   --min-train-eligible 1000 \
   --require-verifier-type hidden-command \
   --output runs/seed-corpus-demo/production-import-rehearsal.json
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
+  --root runs/seed-corpus-demo/production-ci-import-rehearsal \
+  --source runs/seed-corpus-demo/production-public-ci-source-records.jsonl \
+  --format public-ci \
+  --source-name production-public-python-ci \
+  --allowlist examples/production-repository-allowlist.json \
+  --overwrite-registry \
+  --min-imported 1 \
+  --max-quarantined 0 \
+  --require-task-family ci-build \
+  --require-verifier-type hidden-command \
+  --output runs/seed-corpus-demo/production-ci-import-rehearsal.json
 ```
 
 `collection-export` reads the plan and writes normalized public issue/PR JSONL records. It can use
@@ -293,15 +314,15 @@ with `--github-token-env GITHUB_TOKEN` when rate limits require it. Use `--max-t
 duplicating source-instance IDs. `--allow-partial` is useful for rate-limited runs because valid
 records are still written and can be audited while failed tasks remain visible in the summary. CI
 collection tasks export `public_ci` records from failed workflow runs with fixed head SHAs and
-`ci_commands` verifier evidence. They are collection/audit records only until a CI-specific
-registry importer is added; the public issue/PR importer rejects them instead of silently treating
-them as issue records. `collection-readiness` combines the collection plan, export summary, and
-audit output into the registry-import gate: small probes can lower `--min-accepted`, while
-production runs should require the policy target, issue, PR, and CI records, clean export
-summaries, and full plan-task coverage. `import-rehearsal` then imports the audited trainable
-source JSONL into a temporary registry, applies the allowlist, runs registry validation and
-seed-audit gates, and writes a pre-materialization summary. Until real exported records exist, use
-the toy demo below to validate the end-to-end local gate mechanics:
+`ci_commands` verifier evidence. Import issue/PR and CI records through their matching formats:
+the public issue/PR importer still rejects CI records, while `--format public-ci` maps CI commands
+to hidden verifier commands for `ci_build` seeds. `collection-readiness` combines the collection
+plan, export summary, and audit output into the registry-import gate: small probes can lower
+`--min-accepted`, while production runs should require the policy target, issue, PR, and CI
+records, clean export summaries, and full plan-task coverage. `import-rehearsal` then imports each
+audited trainable source shard into a temporary registry, applies the allowlist, runs registry
+validation and seed-audit gates, and writes a pre-materialization summary. Until real exported
+records exist, use the toy demo below to validate the end-to-end local gate mechanics:
 
 ```bash
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \

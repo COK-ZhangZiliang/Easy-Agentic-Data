@@ -73,7 +73,7 @@
     "remaining_requirements": [
       "Add non-Python or cross-language sources before applying the 80% maximum language-share gate to the full corpus.",
       "Run resumable collection-export shards, collection-audit, collection-readiness, and import-rehearsal for public issue and PR records from fixed commits.",
-      "Add a CI-specific registry importer and materialization path before using CI collection records as trainable source records.",
+      "Run CI-specific import rehearsals and sampled materialization checks before using CI collection records as trainable source records.",
       "Generate repository-grounded synthetic backfill only for under-covered families and verifier types.",
       "Materialize train and holdout registries, then run seed and scenario decontamination audits.",
       "Approve a stratified human-review sample and a small DeepSeek V4 Pro pilot before larger shards."

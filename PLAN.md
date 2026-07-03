@@ -439,6 +439,9 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add a CI-specific source collection record contract for failed workflow runs, including fixed
   head revisions, public run URLs, labels, and `ci_commands` verifier evidence, while blocking
   accidental public issue/PR import of CI records.
+- [x] Add a CI-specific registry importer that maps failed workflow runs to `ci_build` seeds,
+  stores `ci_commands` as hidden verifier evidence, and keeps CI records out of the public
+  issue/PR importer.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -494,7 +497,8 @@ Current checkpoint:
   fail.
 - `collection-export` can now export CI failure records as `public_ci` audit records with fixed
   workflow-run revisions and `ci_commands` evidence. These records are intentionally rejected by
-  the public issue/PR importer until a CI-specific registry importer is added.
+  the public issue/PR importer; the `public_ci` importer now handles them as `ci_build` seeds with
+  hidden-command verifier evidence.
 - The latest anonymous GitHub API collection attempt covered and processed all 30 planned tasks
   after CI collection support. It added five PR records to the existing two-record probe, but 28
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
@@ -553,12 +557,11 @@ Immediate next execution plan:
    - Exit gate: imported issue/PR seeds have stable task IDs, fixed revisions, compatible licenses,
      source-instance IDs, task families, verifier types, train eligibility, and coverage tags.
 
-4. **CI importer design before CI training use**
-   - Add a CI-specific registry importer that maps failed workflow runs to reproducible
-     workspaces, stores `ci_commands` as verifier evidence, and avoids treating workflow failures
-     as issue text.
-   - Add fixture, import, registry-validation, and seed-audit tests before any `public_ci` record is
-     marked trainable.
+4. **CI source import and materialization validation**
+   - Run `public_ci` import rehearsals separately from issue/PR shards so failed workflow runs are
+     routed through the CI importer instead of the public issue/PR importer.
+   - Materialize sampled CI scenarios from fixed source revisions and confirm their `ci_commands`
+     run as hidden verifier commands in the target workspace.
    - Exit gate: CI records can be imported, materialized, reset, and verified without passing
      through the public issue/PR importer.
 
@@ -767,3 +770,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Verified a small public issue/PR registry import rehearsal and fixed noisy PR checklist task-family inference. |
 | 2026-07-03 | Added a reusable registry import rehearsal gate for audited public source records. |
 | 2026-07-03 | Added a CI source collection record contract while keeping CI records out of the issue/PR importer. |
+| 2026-07-03 | Added a CI registry importer for public workflow failure records. |

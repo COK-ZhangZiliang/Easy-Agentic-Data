@@ -57,7 +57,9 @@ from easy_agentic_data.registry import (
 )
 from easy_agentic_data.registry_sources import (
     DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+    PUBLIC_CI_FORMATS,
     PUBLIC_ISSUE_PR_FORMATS,
+    import_public_ci_records,
     import_public_issue_pr_records,
     import_swe_style_records,
     load_source_records,
@@ -290,6 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "public-issue",
             "public-pr",
             "public-issue-pr",
+            "public-ci",
         ],
     )
     import_rehearsal_parser.add_argument("--source-name", default="")
@@ -395,6 +398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "public-issue",
             "public-pr",
             "public-issue-pr",
+            "public-ci",
         ],
         help="External source record shape",
     )
@@ -905,6 +909,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     permitted_use=args.permitted_use,
                     limit=args.limit,
                     test_command_template=args.test_command_template,
+                    task_family=args.task_family,
+                    source_method=args.source_method,
+                    train_eligible=train_eligible,
+                    contamination_tags=args.contamination_tag,
+                    coverage_tags=args.coverage_tag,
+                    train_license_allowlist=sorted(
+                        set(DEFAULT_TRAIN_LICENSE_ALLOWLIST) | set(args.allow_train_license)
+                    ),
+                    strict=args.strict,
+                )
+            elif source_format in PUBLIC_CI_FORMATS:
+                summary = import_public_ci_records(
+                    registry,
+                    records,
+                    source_format=args.format,
+                    source_name=args.source_name,
+                    split=args.split,
+                    license_name=args.license,
+                    permitted_use=args.permitted_use,
+                    limit=args.limit,
                     task_family=args.task_family,
                     source_method=args.source_method,
                     train_eligible=train_eligible,

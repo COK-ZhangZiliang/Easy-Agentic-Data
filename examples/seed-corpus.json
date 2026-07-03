@@ -19,6 +19,16 @@
       "allow_train_licenses": ["Apache-2.0"]
     }
   ],
+  "public_ci_sources": [
+    {
+      "path": "public-ci-seeds.jsonl",
+      "format": "public-ci",
+      "source_name": "curated-public-ci",
+      "split": "train",
+      "train_eligible": "auto",
+      "allow_train_licenses": ["Apache-2.0"]
+    }
+  ],
   "repository_synthetic_sources": [
     {
       "path": "repository-synthesis.json",

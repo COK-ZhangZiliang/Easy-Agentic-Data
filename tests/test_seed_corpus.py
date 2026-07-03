@@ -147,6 +147,108 @@ class SeedCorpusTests(unittest.TestCase):
                 1,
             )
 
+    def test_rehearse_registry_import_gates_public_ci_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "ci.jsonl"
+            allowlist = root / "allowlist.json"
+            source.write_text(json.dumps(_public_ci_record()) + "\n", encoding="utf-8")
+            allowlist.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+
+            rehearsal = rehearse_registry_import(
+                registry_root=root / "rehearsal",
+                source_path=source,
+                source_format="public-ci",
+                source_name="curated-public-ci",
+                allowlist_path=allowlist,
+                min_imported=1,
+                max_quarantined=0,
+                seed_policy=SeedLibraryPolicy(
+                    min_train_eligible=1,
+                    required_task_families=["ci_build"],
+                    required_verifier_types=["hidden_command"],
+                ),
+            )
+
+            self.assertTrue(rehearsal["valid"])
+            self.assertEqual(rehearsal["import"]["source_format"], "public_ci")
+            self.assertEqual(rehearsal["import"]["imported"], 1)
+            scenario = ScenarioRegistry(root / "rehearsal").get_scenario(
+                rehearsal["import"]["scenario_ids"][0]
+            )
+            self.assertEqual(scenario.query_seed.task_family, "ci_build")
+            self.assertEqual(scenario.hidden_evaluator.hidden_tests, ["python -m pytest"])
+
+    def test_build_seed_corpus_imports_public_ci_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            public_source = root / "public.jsonl"
+            ci_source = root / "ci.jsonl"
+            allowlist_source = root / "allowlist.json"
+            public_source.write_text(
+                json.dumps(_public_issue_record()) + "\n",
+                encoding="utf-8",
+            )
+            ci_source.write_text(json.dumps(_public_ci_record()) + "\n", encoding="utf-8")
+            allowlist_source.write_text(
+                json.dumps({"repositories": [_allowlist_record()]}),
+                encoding="utf-8",
+            )
+            config = {
+                "train_registry_root": "train",
+                "manifest_output": "manifest.json",
+                "overwrite_outputs": True,
+                "overwrite_registries": True,
+                "repository_allowlist": allowlist_source.name,
+                "public_issue_sources": [
+                    {
+                        "path": public_source.name,
+                        "format": "public-issue",
+                        "source_name": "curated-public-issues",
+                    }
+                ],
+                "public_ci_sources": [
+                    {
+                        "path": ci_source.name,
+                        "format": "public-ci",
+                        "source_name": "curated-public-ci",
+                    }
+                ],
+                "seed_policy": {
+                    "min_train_eligible": 2,
+                    "required_task_families": ["bug_repair", "ci_build"],
+                    "required_verifier_types": ["hidden_command"],
+                },
+                "coverage_budgets": {
+                    "min_task_family_counts": {"bug_repair": 1, "ci_build": 1},
+                    "min_language_counts": {"python": 1},
+                    "max_quarantined_records": 0,
+                },
+                "review": {"required": False},
+                "scale_decision": {
+                    "approved": False,
+                    "reason": "Unit-test corpus requires pilot review before scale-up.",
+                },
+            }
+            config_path = root / "seed-corpus.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            manifest = build_seed_corpus(config_path, overwrite_outputs=True)
+
+            self.assertTrue(manifest["valid"])
+            self.assertEqual(manifest["seed_audit"]["train_eligible"], 2)
+            self.assertEqual(
+                manifest["seed_audit"]["train_task_family_counts"],
+                {"bug_repair": 1, "ci_build": 1},
+            )
+            self.assertIn(
+                "public_ci",
+                {snapshot["format"] for snapshot in manifest["source_snapshots"]},
+            )
+
     def test_cli_import_rehearsal_returns_nonzero_when_policy_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -319,6 +421,24 @@ def _public_issue_record() -> dict[str, object]:
         "image_digest": PINNED_IMAGE,
         "test_commands": ["python -m pytest tests/test_parser.py::test_whitespace"],
         "patch": "HIDDEN_ORACLE_PATCH",
+    }
+
+
+def _public_ci_record() -> dict[str, object]:
+    return {
+        **_public_issue_record(),
+        "id": "ci-100",
+        "type": "ci_failure",
+        "source_instance_id": "example__tool-ci-100",
+        "source_url": "https://github.com/example/tool/actions/runs/100",
+        "title": "CI failure on parser workflow",
+        "body": "The parser workflow failed on a fixed commit.",
+        "labels": ["ci", "failure"],
+        "ci_commands": ["python -m pytest"],
+        "candidate_verifier": {
+            "type": "ci_commands",
+            "commands": ["python -m pytest"],
+        },
     }
 
 

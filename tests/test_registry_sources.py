@@ -9,8 +9,10 @@ from pathlib import Path
 from easy_agentic_data.cli import main
 from easy_agentic_data.registry import ScenarioRegistry
 from easy_agentic_data.registry_sources import (
+    import_public_ci_records,
     import_public_issue_pr_records,
     import_swe_style_records,
+    scenario_from_public_ci_record,
     scenario_from_public_issue_pr_record,
     scenario_from_swe_style_record,
 )
@@ -364,6 +366,92 @@ class RegistrySourceTests(unittest.TestCase):
             self.assertEqual(summary.skipped, 1)
             self.assertIn("CI source records require", summary.issues[0])
             self.assertEqual(registry.list_scenarios(), [])
+
+    def test_public_ci_import_uses_ci_commands_as_hidden_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ScenarioRegistry(directory)
+            summary = import_public_ci_records(
+                registry,
+                [_public_ci_record()],
+                source_format="public-ci",
+                source_name="curated-public-ci",
+            )
+
+            self.assertEqual(summary.imported, 1)
+            self.assertEqual(summary.skipped, 0)
+            scenario = registry.get_scenario(summary.scenario_ids[0])
+            encoded_public = json.dumps(scenario.to_dict(include_hidden=False), sort_keys=True)
+
+            self.assertEqual(scenario.query_seed.task_family, "ci_build")
+            self.assertEqual(scenario.query_seed.source_method, "public_ci_workspace")
+            self.assertTrue(scenario.query_seed.train_eligible)
+            self.assertIn("hidden_command", scenario.query_seed.verifier_types)
+            self.assertIn("task_family:ci_build", scenario.query_seed.coverage_tags)
+            self.assertIn("source_format:public_ci", scenario.query_seed.coverage_tags)
+            self.assertEqual(scenario.query_seed.public.context["source_type"], "public_ci")
+            self.assertEqual(scenario.environment.source_uri, "https://github.com/example/tool.git")
+            self.assertEqual(scenario.environment.source_revision, "e" * 40)
+            self.assertEqual(scenario.environment.metadata["source_adapter"], "public_ci")
+            self.assertEqual(scenario.hidden_evaluator.hidden_tests, ["python -m pytest"])
+            self.assertEqual(
+                scenario.hidden_evaluator.metadata["ci_commands"],
+                ["python -m pytest"],
+            )
+            self.assertNotIn("python -m pytest", encoded_public)
+            self.assertTrue(registry.validate().valid)
+
+    def test_public_ci_import_requires_ci_commands(self) -> None:
+        record = {**_public_ci_record(), "ci_commands": []}
+
+        with self.assertRaisesRegex(ValueError, "ci_commands verifier evidence"):
+            scenario_from_public_ci_record(record, source_format="public-ci")
+
+    def test_cli_public_ci_import_and_seed_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "ci.jsonl"
+            root = Path(directory) / "registry"
+            source.write_text(json.dumps(_public_ci_record()) + "\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "import",
+                        "--root",
+                        str(root),
+                        "--source",
+                        str(source),
+                        "--format",
+                        "public-ci",
+                        "--source-name",
+                        "curated-public-ci",
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["imported"], 1)
+
+            audit_stdout = io.StringIO()
+            with redirect_stdout(audit_stdout):
+                audit_exit_code = main(
+                    [
+                        "registry",
+                        "seed-audit",
+                        "--root",
+                        str(root),
+                        "--require-task-family",
+                        "ci-build",
+                        "--require-verifier-type",
+                        "hidden-command",
+                    ]
+                )
+
+            audit = json.loads(audit_stdout.getvalue())
+            self.assertEqual(audit_exit_code, 0)
+            self.assertTrue(audit["valid"])
+            self.assertEqual(audit["train_task_family_counts"], {"ci_build": 1})
 
     def test_public_issue_auto_blocks_non_allowlisted_license(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

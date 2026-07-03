@@ -14,8 +14,10 @@ from easy_agentic_data.batch import enqueue_human_review
 from easy_agentic_data.registry import ScenarioRegistry
 from easy_agentic_data.registry_sources import (
     DEFAULT_TRAIN_LICENSE_ALLOWLIST,
+    PUBLIC_CI_FORMATS,
     PUBLIC_ISSUE_PR_FORMATS,
     RegistryImportSummary,
+    import_public_ci_records,
     import_public_issue_pr_records,
     import_swe_style_records,
     load_source_records,
@@ -94,6 +96,18 @@ def build_seed_corpus(
             _dict_list(config.get("public_issue_sources")),
             config_dir=config_dir,
             default_format="public_issue_pr",
+            default_split="train",
+            default_train_eligible=None,
+            allowlist_records=allowlist_records,
+            allowlist_filters=allowlist_filters,
+        )
+    )
+    import_summaries.extend(
+        _import_record_sources(
+            train_registry,
+            _dict_list(config.get("public_ci_sources")),
+            config_dir=config_dir,
+            default_format="public_ci",
             default_split="train",
             default_train_eligible=None,
             allowlist_records=allowlist_records,
@@ -327,6 +341,26 @@ def rehearse_registry_import(
             ),
             strict=strict,
         )
+    elif normalized_format in PUBLIC_CI_FORMATS:
+        import_summary = import_public_ci_records(
+            registry,
+            records,
+            source_format=normalized_format,
+            source_name=source_name,
+            split=split,
+            license_name=license_name,
+            permitted_use=permitted_use,
+            limit=limit,
+            task_family=task_family,
+            source_method=source_method,
+            train_eligible=train_eligible,
+            contamination_tags=contamination_tags,
+            coverage_tags=coverage_tags,
+            train_license_allowlist=sorted(
+                set(DEFAULT_TRAIN_LICENSE_ALLOWLIST) | set(allow_train_licenses)
+            ),
+            strict=strict,
+        )
     else:
         import_summary = import_swe_style_records(
             registry,
@@ -472,6 +506,29 @@ def _import_record_sources(
                     permitted_use=str(source.get("permitted_use", "research")),
                     limit=_optional_int(source.get("limit")),
                     test_command_template=str(source.get("test_command_template", "")),
+                    task_family=str(source.get("task_family", "")),
+                    source_method=str(source.get("source_method", "")),
+                    train_eligible=train_eligible,
+                    contamination_tags=_string_list(source.get("contamination_tags")),
+                    coverage_tags=_string_list(source.get("coverage_tags")),
+                    train_license_allowlist=sorted(
+                        set(DEFAULT_TRAIN_LICENSE_ALLOWLIST)
+                        | set(_string_list(source.get("allow_train_licenses")))
+                    ),
+                    strict=bool(source.get("strict", False)),
+                )
+            )
+        elif source_format in PUBLIC_CI_FORMATS:
+            summaries.append(
+                import_public_ci_records(
+                    registry,
+                    records,
+                    source_format=source_format,
+                    source_name=str(source.get("source_name", "")),
+                    split=str(source.get("split", default_split)),
+                    license_name=str(source.get("license", "")),
+                    permitted_use=str(source.get("permitted_use", "research")),
+                    limit=_optional_int(source.get("limit")),
                     task_family=str(source.get("task_family", "")),
                     source_method=str(source.get("source_method", "")),
                     train_eligible=train_eligible,
@@ -671,6 +728,7 @@ def _source_snapshots(config: dict[str, Any], config_dir: Path) -> list[dict[str
     snapshots = []
     section_defaults = {
         "public_issue_sources": "public_issue_pr",
+        "public_ci_sources": "public_ci",
         "swe_style_sources": "auto",
         "repository_synthetic_sources": "repository_synthetic",
         "holdout_sources": "auto",
