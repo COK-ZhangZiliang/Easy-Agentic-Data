@@ -327,6 +327,29 @@ class RegistrySourceTests(unittest.TestCase):
         self.assertIn("diff_constraint", scenario.query_seed.verifier_types)
         self.assertIn("python -m build", scenario.hidden_evaluator.hidden_tests)
 
+    def test_public_pr_import_ignores_body_checklist_noise_for_family(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "type": "pull_request",
+                "number": 43,
+                "title": "fix: add explicit stacklevel to warnings",
+                "body": (
+                    "Syntax verified.\n\n"
+                    "Checklist:\n"
+                    "- [x] You've added tests.\n"
+                    "- [ ] You've updated the documentation."
+                ),
+                "labels": ["bug", "documentation", "tests"],
+            },
+            source_format="public-pr",
+            source_name="curated-public-prs",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "bug_repair")
+        self.assertIn("hidden_command", scenario.query_seed.verifier_types)
+        self.assertIn("task_family:bug_repair", scenario.query_seed.coverage_tags)
+
     def test_public_issue_auto_blocks_non_allowlisted_license(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry = ScenarioRegistry(directory)

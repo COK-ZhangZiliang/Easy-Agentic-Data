@@ -657,23 +657,23 @@ def _license_allowed_for_train(license_name: str, allowlist: set[str]) -> bool:
 
 def _infer_public_task_family(record: dict[str, Any], source_type: str) -> str:
     labels = {_normalize_task_label(value) for value in _list_field(record.get("labels"))}
-    query_tokens = set(
+    title_tokens = set(
         _normalize_task_label(value)
-        for value in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", _query_text(record))
+        for value in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", _text_field(record.get("title")))
     )
-    signals = labels | query_tokens
+    signals = labels | title_tokens
     mapping = (
         ("code_review", {"review", "comments", "requested_changes"}),
         ("security_hardening", {"security", "vulnerability", "cve", "xss", "injection"}),
         ("performance", {"performance", "perf", "slow", "latency", "benchmark"}),
         ("dependency_upgrade", {"dependency", "dependencies", "upgrade", "deps"}),
         ("migration", {"migration", "migrate", "schema"}),
-        ("docs_examples", {"docs", "documentation", "example", "examples", "readme"}),
         ("ci_build", {"ci", "build", "packaging", "lint", "typing", "workflow"}),
+        ("bug_repair", {"bug", "regression", "defect", "fix", "crash"}),
         ("test_authoring", {"test", "tests", "coverage", "flaky"}),
         ("refactor", {"refactor", "cleanup", "simplify"}),
         ("feature_implementation", {"feature", "enhancement", "api"}),
-        ("bug_repair", {"bug", "regression", "defect", "fix", "crash"}),
+        ("docs_examples", {"docs", "documentation", "example", "examples", "readme"}),
         ("repo_understanding", {"question", "help", "explain", "investigate"}),
     )
     for family, terms in mapping:

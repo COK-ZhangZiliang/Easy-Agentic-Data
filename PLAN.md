@@ -431,6 +431,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   issue/PR export runs.
 - [x] Add a source collection readiness gate that combines collection plans, export summaries, and
   audit outputs before registry import.
+- [x] Validate a small public issue/PR registry import rehearsal and harden task-family inference
+  against noisy PR body checklist terms.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -476,6 +478,13 @@ Current checkpoint:
 - `registry collection-readiness` now combines the collection plan, export summary, and collection
   audit into a registry-import gate with accepted-record, quarantine, source-type, clean-export,
   and full-plan coverage thresholds.
+- A small registry import rehearsal with the currently collected PR records passes registry
+  validation and seed-audit family/verifier consistency after filtering noisy PR checklist terms
+  out of task-family inference.
+- The latest anonymous GitHub API collection attempt covered all 30 planned tasks and processed
+  all 20 supported issue/PR tasks, but every issue/PR request hit HTTP 403 rate limits. The current
+  source collection remains a probe with 2 accepted PR records, no accepted issue records, and no
+  production import approval.
 - The next data gate is to run all production issue/PR shards with `collection-export`, then run
   `collection-audit` and `collection-readiness` before registry import.
 
@@ -683,3 +692,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-01 | Added a scale-readiness summary CLI to combine candidate selection, cost estimate, shard status, trace audit, and continuation gates. |
 | 2026-07-03 | Expanded the P7 production seed-corpus plan with milestone-level inputs, actions, outputs, and exit gates. |
 | 2026-07-03 | Added a source collection readiness gate before production seed-corpus registry import. |
+| 2026-07-03 | Verified a small public issue/PR registry import rehearsal and fixed noisy PR checklist task-family inference. |
