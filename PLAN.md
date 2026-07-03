@@ -78,6 +78,8 @@ The first production-capable release must:
 - [x] Seed-corpus build gate that imports configured train and holdout sources, runs registry,
   seed, scenario, coverage, and review-queue checks, and freezes a manifest for pilot decisions
 - [x] Repository allowlist audit and seed-corpus allowlist enforcement for train-source quarantine
+- [x] Source collection plan and local export audit for public issue/PR records before registry
+  import
 - [x] Registry-backed smoke rollout coverage for every supported task family in
   `tests/test_seed_library_rollouts.py`
 
@@ -461,8 +463,8 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
    - Quarantine records that are missing a license, contain personal data or credentials, use
      mutable revisions, reference private URLs, duplicate held-out sources, or cannot identify a
      reproducible workspace.
-   - Exit gate: imported records must pass repository allowlist checks, registry validation, and
-     quarantine accounting before any model rollout.
+   - Exit gate: exported source records must pass collection audit, repository allowlist checks,
+     registry validation, and quarantine accounting before any model rollout.
 
 3. **Synthetic coverage backfill**
    - Use repository-grounded synthesis only for under-covered task families or difficulty bands,

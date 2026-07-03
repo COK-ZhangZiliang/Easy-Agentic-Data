@@ -83,6 +83,10 @@ from easy_agentic_data.seed_library import (
 )
 from easy_agentic_data.seed_corpus import build_seed_corpus
 from easy_agentic_data.seed_review import build_seed_review_queue
+from easy_agentic_data.source_collection import (
+    audit_public_source_records,
+    build_source_collection_plan,
+)
 from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
 from easy_agentic_data.tools import default_tool_registry
@@ -285,6 +289,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=[],
         help="Repository name that must be treated as benchmark-overlapping",
     )
+    collection_plan_parser = registry_subparsers.add_parser("collection-plan")
+    collection_plan_parser.add_argument("--allowlist", required=True)
+    collection_plan_parser.add_argument("--output", default="")
+    collection_plan_parser.add_argument("--output-root", default="runs/source-exports")
+    collection_plan_parser.add_argument("--source-name", default="curated-public-sources")
+    collection_audit_parser = registry_subparsers.add_parser("collection-audit")
+    collection_audit_parser.add_argument("--source", required=True)
+    collection_audit_parser.add_argument("--allowlist", required=True)
+    collection_audit_parser.add_argument("--output", default="")
+    collection_audit_parser.add_argument("--source-name", default="curated-public-sources")
     inspect_parser = registry_subparsers.add_parser("inspect")
     inspect_parser.add_argument("--root", required=True)
     inspect_parser.add_argument("--scenario-id", required=True)
@@ -585,6 +599,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                     set(DEFAULT_TRAIN_LICENSE_ALLOWLIST) | set(args.allow_train_license)
                 ),
                 benchmark_repositories=args.benchmark_repository,
+            )
+            payload = audit.to_dict()
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if audit.valid else 2
+        if args.registry_command == "collection-plan":
+            plan = build_source_collection_plan(
+                load_repository_allowlist(args.allowlist),
+                output_root=args.output_root,
+                source_name=args.source_name,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(plan, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(plan, indent=2, sort_keys=True))
+            return 0 if plan["valid"] else 2
+        if args.registry_command == "collection-audit":
+            audit = audit_public_source_records(
+                load_source_records(args.source),
+                load_repository_allowlist(args.allowlist),
+                source_name=args.source_name,
             )
             payload = audit.to_dict()
             if args.output:
