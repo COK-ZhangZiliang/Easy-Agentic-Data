@@ -83,7 +83,11 @@ from easy_agentic_data.seed_library import (
     SeedLibraryPolicy,
     audit_seed_library,
 )
-from easy_agentic_data.seed_corpus import build_seed_corpus, rehearse_registry_import
+from easy_agentic_data.seed_corpus import (
+    build_seed_backfill_plan,
+    build_seed_corpus,
+    rehearse_registry_import,
+)
 from easy_agentic_data.seed_review import build_seed_review_queue
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
@@ -286,6 +290,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Overwrite append-only review queue outputs declared by the corpus config",
     )
+    seed_backfill_parser = registry_subparsers.add_parser("seed-backfill-plan")
+    seed_backfill_parser.add_argument("--audit", required=True)
+    seed_backfill_parser.add_argument("--policy", required=True)
+    seed_backfill_parser.add_argument("--output", default="")
     import_rehearsal_parser = registry_subparsers.add_parser("import-rehearsal")
     import_rehearsal_parser.add_argument("--root", required=True)
     import_rehearsal_parser.add_argument("--source", required=True)
@@ -1030,6 +1038,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 materialize_sample_count=args.materialize_sample_count,
                 materialize_root=args.materialize_root or None,
                 run_hidden_commands=args.run_hidden_commands,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-backfill-plan":
+            payload = build_seed_backfill_plan(
+                json.loads(Path(args.audit).read_text(encoding="utf-8")),
+                json.loads(Path(args.policy).read_text(encoding="utf-8")),
             )
             if args.output:
                 Path(args.output).parent.mkdir(parents=True, exist_ok=True)

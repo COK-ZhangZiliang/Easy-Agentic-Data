@@ -583,6 +583,16 @@ Current checkpoint:
   `benchmark_command`, `build_command`, `doctest`, `hidden_test_patch`, and `retrieval_evidence`
   verifier types are absent; `ci_build` accounts for 53.6% of trainable seeds; `textualize/rich`
   accounts for 12.5%; and Python accounts for 100% of trainable seeds.
+- `registry seed-backfill-plan` now converts the failed seed-audit plus the production policy into
+  an explicit backfill runbook before new data is collected. The current deep candidate plan
+  requires at least 200 repository-grounded synthetic records, family backfill for `docs_examples`
+  75, `performance` 40, `repo_understanding` 50, `test_authoring` 71, `refactor` 56,
+  `security_hardening` 37, `migration` 33, and `code_review` 33, plus missing verifier evidence
+  for `hidden_test_patch` 100, `build_command` 100, `doctest` 50, `retrieval_evidence` 50,
+  `adversarial_test` 30, and `benchmark_command` 30. It also shows that append-only balancing
+  would need 463 non-Python records, 2,114 non-`ci_build` records, and 470 non-`textualize/rich`
+  records, so the next corpus construction step must combine targeted backfill with balanced
+  sampling rather than only appending records.
 - `registry collection-shard-status` now reads the deterministic shard runbook plus local
   preflight reports, shard export summaries, and source JSONL, then assigns each shard a next
   action such as `run_preflight`, `run_export`, `resolve_preflight`, `plan_retry`, or
@@ -633,8 +643,9 @@ Immediate next execution plan:
      types, and zero quarantine.
 
 3. **Coverage backfill and holdout separation**
-   - Use seed-audit gaps from real source import to decide which repository-grounded synthetic
-     families are still needed.
+   - Use `registry seed-backfill-plan` on seed-audit gaps from real source import to decide which
+     repository-grounded synthetic families, verifier evidence, cross-language sources, and
+     balanced-sampling constraints are still needed.
    - Generate repository-grounded synthetic seeds for missing `docs_examples`, `performance`, and
      `repo_understanding` families with `doctest`, `benchmark_command`, `retrieval_evidence`, and
      other required verifier evidence instead of relabeling weak public records.
@@ -793,3 +804,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a source collection shard status gate and updated the detailed production collection plan. |
 | 2026-07-04 | Completed authenticated 30-task source collection, clean accepted-output filtering, readiness probes, and issue/PR plus CI import rehearsals. |
 | 2026-07-04 | Deepened authenticated source collection to 1,850 clean records, passed production source-readiness, reran import rehearsals, and recorded measured seed-audit backfill gaps. |
+| 2026-07-04 | Added a seed backfill planning gate that turns failed seed-audit coverage, verifier, language, repository, and family-share gaps into a deterministic runbook before synthetic generation. |

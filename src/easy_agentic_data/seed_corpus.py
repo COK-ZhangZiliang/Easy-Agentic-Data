@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shlex
 import shutil
 import subprocess
@@ -43,12 +44,14 @@ from easy_agentic_data.scenario_decontamination import (
 from easy_agentic_data.seed_library import (
     DEFAULT_BENCHMARK_SOURCE_ALIASES,
     SeedLibraryPolicy,
+    TASK_FAMILY_VERIFIER_TEMPLATES,
     audit_seed_library,
 )
 from easy_agentic_data.seed_review import build_seed_review_queue
 
 SEED_CORPUS_SCHEMA_VERSION = "easy_agentic_data.seed_corpus.v1"
 REGISTRY_IMPORT_REHEARSAL_SCHEMA_VERSION = "easy_agentic_data.registry_import_rehearsal.v1"
+SEED_BACKFILL_PLAN_SCHEMA_VERSION = "easy_agentic_data.seed_backfill_plan.v1"
 
 
 def build_seed_corpus(
@@ -446,6 +449,134 @@ def rehearse_registry_import(
     }
 
 
+def build_seed_backfill_plan(
+    seed_audit: dict[str, Any],
+    policy_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert seed-audit coverage failures into deterministic backfill actions."""
+
+    audit = _dict(seed_audit)
+    config = _dict(policy_config)
+    policy = _seed_policy(config.get("seed_policy", config))
+    coverage_budgets = _dict(config.get("coverage_budgets"))
+    train_eligible = _int(audit.get("train_eligible"), default=0)
+    target_train_eligible = max(
+        _int(config.get("target_train_eligible"), default=0),
+        policy.min_train_eligible,
+    )
+    family_counts = _normalized_int_counts(
+        audit.get("train_task_family_counts") or audit.get("task_family_counts")
+    )
+    verifier_counts = _normalized_int_counts(
+        audit.get("train_verifier_type_counts") or audit.get("verifier_type_counts")
+    )
+    source_method_counts = _normalized_int_counts(
+        audit.get("train_source_method_counts") or audit.get("source_method_counts")
+    )
+    language_counts = _normalized_int_counts(
+        audit.get("train_language_counts") or audit.get("language_counts")
+    )
+    repository_counts = _normalized_int_counts(audit.get("train_repository_counts"))
+
+    task_family_gaps = _count_gaps(
+        family_counts,
+        minimum_counts=_int_dict(coverage_budgets.get("min_task_family_counts")),
+        required_present=policy.required_task_families,
+        dimension="task_family",
+    )
+    verifier_type_gaps = _count_gaps(
+        verifier_counts,
+        minimum_counts=_int_dict(coverage_budgets.get("min_verifier_type_counts")),
+        required_present=policy.required_verifier_types,
+        dimension="verifier_type",
+    )
+    source_method_gaps = _count_gaps(
+        source_method_counts,
+        minimum_counts=_int_dict(coverage_budgets.get("min_source_method_counts")),
+        required_present=(),
+        dimension="source_method",
+    )
+    language_count_gaps = _count_gaps(
+        language_counts,
+        minimum_counts=_int_dict(coverage_budgets.get("min_language_counts")),
+        required_present=(),
+        dimension="language",
+    )
+    dominance = {
+        "task_family": _dominance_gaps(
+            family_counts,
+            total=train_eligible,
+            max_share=policy.max_task_family_share,
+            dimension="task_family",
+        ),
+        "source_method": _dominance_gaps(
+            source_method_counts,
+            total=train_eligible,
+            max_share=policy.max_source_method_share,
+            dimension="source_method",
+        ),
+        "repository": _dominance_gaps(
+            repository_counts,
+            total=train_eligible,
+            max_share=policy.max_repository_share,
+            dimension="repository",
+        ),
+        "language": _dominance_gaps(
+            language_counts,
+            total=train_eligible,
+            max_share=policy.max_language_share,
+            dimension="language",
+        ),
+    }
+    train_eligible_gap = max(0, target_train_eligible - train_eligible)
+    actions = _backfill_actions(
+        train_eligible_gap=train_eligible_gap,
+        task_family_gaps=task_family_gaps,
+        verifier_type_gaps=verifier_type_gaps,
+        source_method_gaps=source_method_gaps,
+        language_count_gaps=language_count_gaps,
+        dominance=dominance,
+    )
+    requires_backfill = bool(train_eligible_gap or actions)
+    issue_count = len(audit.get("issues", [])) if isinstance(audit.get("issues"), list) else 0
+    return {
+        "schema_version": SEED_BACKFILL_PLAN_SCHEMA_VERSION,
+        "audit": {
+            "valid": bool(audit.get("valid", False)),
+            "total": _int(audit.get("total"), default=train_eligible),
+            "train_eligible": train_eligible,
+            "issue_count": issue_count,
+        },
+        "policy": {
+            "target_train_eligible": target_train_eligible,
+            "seed_policy": asdict(policy),
+            "coverage_budgets": coverage_budgets,
+        },
+        "counts": {
+            "task_family": family_counts,
+            "verifier_type": verifier_counts,
+            "source_method": source_method_counts,
+            "language": language_counts,
+            "repository": repository_counts,
+        },
+        "gaps": {
+            "train_eligible": {
+                "current": train_eligible,
+                "minimum": target_train_eligible,
+                "shortfall": train_eligible_gap,
+            },
+            "task_family": task_family_gaps,
+            "verifier_type": verifier_type_gaps,
+            "source_method": source_method_gaps,
+            "language_count": language_count_gaps,
+            "dominance": dominance,
+        },
+        "recommended_actions": actions,
+        "requires_backfill": requires_backfill,
+        "valid": True,
+    }
+
+
 def _import_rehearsal_gate_issues(
     *,
     imported: int,
@@ -819,6 +950,207 @@ def _add_min_count_issues(
                     "severity": "error",
                 }
             )
+
+
+def _normalized_int_counts(value: Any) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for key, count in _dict(value).items():
+        label = _normalize_label(key)
+        if label:
+            counts[label] += int(count)
+    return dict(sorted(counts.items()))
+
+
+def _count_gaps(
+    counts: dict[str, int],
+    *,
+    minimum_counts: dict[str, int],
+    required_present: Iterable[str],
+    dimension: str,
+) -> list[dict[str, Any]]:
+    normalized_minimums = {
+        _normalize_label(key): max(0, int(value)) for key, value in minimum_counts.items()
+    }
+    required_labels = {_normalize_label(label) for label in required_present}
+    required_labels.discard("")
+    targets = sorted(set(normalized_minimums) | required_labels)
+    gaps = []
+    for target in targets:
+        minimum = max(normalized_minimums.get(target, 0), 1 if target in required_labels else 0)
+        current = int(counts.get(target, 0))
+        if current >= minimum:
+            continue
+        gap = {
+            "dimension": dimension,
+            "target": target,
+            "current": current,
+            "minimum": minimum,
+            "shortfall": minimum - current,
+            "required_by_presence_policy": target in required_labels,
+            "required_by_minimum_budget": target in normalized_minimums,
+        }
+        if dimension == "task_family":
+            template = TASK_FAMILY_VERIFIER_TEMPLATES.get(target)
+            if template is not None:
+                gap["accepted_verifier_types"] = list(template.accepted_verifier_types)
+                gap["minimum_evidence"] = template.minimum_evidence
+        gaps.append(gap)
+    return gaps
+
+
+def _dominance_gaps(
+    counts: dict[str, int],
+    *,
+    total: int,
+    max_share: float,
+    dimension: str,
+) -> list[dict[str, Any]]:
+    if total <= 0 or max_share >= 1.0:
+        return []
+    gaps = []
+    for target, count in counts.items():
+        if count <= 0:
+            continue
+        share = count / total
+        if share <= max_share:
+            continue
+        add_only_total = math.ceil(count / max_share)
+        gaps.append(
+            {
+                "dimension": dimension,
+                "target": target,
+                "count": count,
+                "total": total,
+                "current_share": round(share, 6),
+                "max_share": max_share,
+                "additional_non_target_if_no_downsampling": max(
+                    0,
+                    add_only_total - total,
+                ),
+            }
+        )
+    return sorted(gaps, key=lambda item: (-float(item["current_share"]), item["target"]))
+
+
+def _backfill_actions(
+    *,
+    train_eligible_gap: int,
+    task_family_gaps: list[dict[str, Any]],
+    verifier_type_gaps: list[dict[str, Any]],
+    source_method_gaps: list[dict[str, Any]],
+    language_count_gaps: list[dict[str, Any]],
+    dominance: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if train_eligible_gap > 0:
+        actions.append(
+            {
+                "action": "increase_trainable_seed_pool",
+                "target": "train_eligible",
+                "minimum_count": train_eligible_gap,
+                "reason": "Trainable seed count is below the configured minimum.",
+            }
+        )
+    for gap in task_family_gaps:
+        target = str(gap["target"])
+        action = (
+            "collect_public_source_family"
+            if target == "bug_repair"
+            else "generate_repository_grounded_synthetic_family"
+        )
+        actions.append(
+            {
+                "action": action,
+                "target": target,
+                "minimum_count": gap["shortfall"],
+                "current_count": gap["current"],
+                "accepted_verifier_types": gap.get("accepted_verifier_types", []),
+                "reason": (
+                    "Task-family coverage is below the required presence or minimum-count gate."
+                ),
+            }
+        )
+    for gap in verifier_type_gaps:
+        actions.append(
+            {
+                "action": "add_verifier_evidence_backfill",
+                "target": gap["target"],
+                "minimum_count": gap["shortfall"],
+                "current_count": gap["current"],
+                "reason": "Verifier evidence coverage is below the configured gate.",
+            }
+        )
+    for gap in source_method_gaps:
+        target = str(gap["target"])
+        action = (
+            "generate_repository_grounded_synthetic_records"
+            if target == "repository_grounded_synthetic"
+            else "collect_source_method_records"
+        )
+        actions.append(
+            {
+                "action": action,
+                "target": target,
+                "minimum_count": gap["shortfall"],
+                "current_count": gap["current"],
+                "reason": "Source-method coverage is below the configured minimum.",
+            }
+        )
+    for gap in language_count_gaps:
+        actions.append(
+            {
+                "action": "collect_language_sources",
+                "target": gap["target"],
+                "minimum_count": gap["shortfall"],
+                "current_count": gap["current"],
+                "reason": "Language coverage is below the configured minimum.",
+            }
+        )
+    _append_dominance_actions(actions, "task_family", dominance["task_family"])
+    _append_dominance_actions(actions, "source_method", dominance["source_method"])
+    _append_dominance_actions(actions, "repository", dominance["repository"])
+    _append_dominance_actions(actions, "language", dominance["language"])
+    if actions:
+        actions.append(
+            {
+                "action": "refresh_holdout_and_decontamination",
+                "target": "holdout_registry",
+                "minimum_count": 0,
+                "reason": (
+                    "Any backfill or balancing change must be followed by seed and "
+                    "scenario decontamination before provider rollout."
+                ),
+            }
+        )
+    return actions
+
+
+def _append_dominance_actions(
+    actions: list[dict[str, Any]],
+    dimension: str,
+    gaps: list[dict[str, Any]],
+) -> None:
+    action_by_dimension = {
+        "task_family": "balance_or_sample_task_family",
+        "source_method": "balance_or_sample_source_method",
+        "repository": "balance_or_sample_repository",
+        "language": "add_cross_language_sources_or_downsample",
+    }
+    for gap in gaps:
+        actions.append(
+            {
+                "action": action_by_dimension[dimension],
+                "target": gap["target"],
+                "minimum_count": gap["additional_non_target_if_no_downsampling"],
+                "current_count": gap["count"],
+                "current_share": gap["current_share"],
+                "max_share": gap["max_share"],
+                "reason": (
+                    "Current share exceeds the configured cap; use targeted backfill, "
+                    "balanced sampling, or both."
+                ),
+            }
+        )
 
 
 def _quarantine_summary(

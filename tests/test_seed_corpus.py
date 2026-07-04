@@ -11,7 +11,11 @@ from pathlib import Path
 from easy_agentic_data.cli import main
 from easy_agentic_data.registry import ScenarioRegistry
 from easy_agentic_data.repository_synthetic import DEFAULT_REPOSITORY_SYNTHETIC_TASK_FAMILIES
-from easy_agentic_data.seed_corpus import build_seed_corpus, rehearse_registry_import
+from easy_agentic_data.seed_corpus import (
+    build_seed_backfill_plan,
+    build_seed_corpus,
+    rehearse_registry_import,
+)
 from easy_agentic_data.seed_library import SUPPORTED_TASK_FAMILIES, SeedLibraryPolicy
 
 PINNED_IMAGE = "python@sha256:" + ("c" * 64)
@@ -52,6 +56,73 @@ class SeedCorpusTests(unittest.TestCase):
             self.assertGreater(len(review_lines), 0)
             self.assertEqual(len(ScenarioRegistry(root / "train").list_scenarios()), 12)
             self.assertEqual(len(ScenarioRegistry(root / "holdout").list_scenarios()), 1)
+
+    def test_seed_backfill_plan_quantifies_coverage_and_dominance_gaps(self) -> None:
+        plan = build_seed_backfill_plan(_backfill_audit(), _backfill_policy())
+
+        family_gaps = {gap["target"]: gap for gap in plan["gaps"]["task_family"]}
+        verifier_gaps = {gap["target"]: gap for gap in plan["gaps"]["verifier_type"]}
+        source_method_gaps = {
+            gap["target"]: gap for gap in plan["gaps"]["source_method"]
+        }
+        dominance = plan["gaps"]["dominance"]
+        actions = {(action["action"], action["target"]) for action in plan["recommended_actions"]}
+
+        self.assertTrue(plan["valid"])
+        self.assertTrue(plan["requires_backfill"])
+        self.assertEqual(family_gaps["docs_examples"]["shortfall"], 5)
+        self.assertEqual(family_gaps["test_authoring"]["shortfall"], 10)
+        self.assertIn("doctest", family_gaps["docs_examples"]["accepted_verifier_types"])
+        self.assertEqual(verifier_gaps["doctest"]["shortfall"], 5)
+        self.assertEqual(
+            source_method_gaps["repository_grounded_synthetic"]["shortfall"],
+            10,
+        )
+        self.assertEqual(
+            dominance["task_family"][0]["additional_non_target_if_no_downsampling"],
+            50,
+        )
+        self.assertEqual(
+            dominance["language"][0]["additional_non_target_if_no_downsampling"],
+            25,
+        )
+        self.assertIn(("generate_repository_grounded_synthetic_family", "docs_examples"), actions)
+        self.assertIn(
+            ("generate_repository_grounded_synthetic_records", "repository_grounded_synthetic"),
+            actions,
+        )
+        self.assertIn(("add_cross_language_sources_or_downsample", "python"), actions)
+        self.assertIn(("refresh_holdout_and_decontamination", "holdout_registry"), actions)
+
+    def test_cli_seed_backfill_plan_writes_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit_path = root / "seed-audit.json"
+            policy_path = root / "policy.json"
+            output_path = root / "backfill-plan.json"
+            audit_path.write_text(json.dumps(_backfill_audit()), encoding="utf-8")
+            policy_path.write_text(json.dumps(_backfill_policy()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "seed-backfill-plan",
+                        "--audit",
+                        str(audit_path),
+                        "--policy",
+                        str(policy_path),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            disk_payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload, disk_payload)
+            self.assertTrue(payload["requires_backfill"])
 
     def test_cli_build_seed_corpus_fails_when_budget_is_unmet(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -522,6 +593,63 @@ def _seed_policy_for_public_probe():
         required_task_families=["bug_repair"],
         required_verifier_types=["hidden_command"],
     )
+
+
+def _backfill_audit() -> dict[str, object]:
+    return {
+        "valid": False,
+        "total": 100,
+        "train_eligible": 100,
+        "train_task_family_counts": {
+            "bug_repair": 30,
+            "ci_build": 60,
+            "test_authoring": 10,
+        },
+        "verifier_type_counts": {"hidden_command": 100},
+        "train_source_method_counts": {
+            "public_ci_workspace": 60,
+            "public_issue_workspace": 40,
+        },
+        "train_language_counts": {"Python": 100},
+        "train_repository_counts": {
+            "example/tool": 70,
+            "other/tool": 30,
+        },
+        "issues": [
+            {
+                "code": "missing_required_task_family",
+                "message": "Required task family is absent from trainable seeds: docs_examples",
+                "severity": "error",
+            }
+        ],
+    }
+
+
+def _backfill_policy() -> dict[str, object]:
+    return {
+        "target_train_eligible": 100,
+        "seed_policy": {
+            "min_train_eligible": 100,
+            "required_task_families": ["bug_repair", "docs_examples", "ci_build"],
+            "required_verifier_types": ["hidden_command", "doctest"],
+            "max_task_family_share": 0.40,
+            "max_source_method_share": 0.70,
+            "max_repository_share": 0.50,
+            "max_language_share": 0.80,
+        },
+        "coverage_budgets": {
+            "min_task_family_counts": {
+                "docs_examples": 5,
+                "test_authoring": 20,
+            },
+            "min_source_method_counts": {
+                "repository_grounded_synthetic": 10,
+            },
+            "min_verifier_type_counts": {
+                "doctest": 5,
+            },
+        },
+    }
 
 
 def _allowlist_record(
