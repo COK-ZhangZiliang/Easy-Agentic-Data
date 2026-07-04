@@ -968,6 +968,11 @@ def _infer_public_task_family(record: dict[str, Any], source_type: str) -> str:
     )
     for family, terms in mapping:
         if signals.intersection(terms):
+            if family in {"performance", "repo_understanding"} and not _has_family_verifier(
+                record,
+                family,
+            ):
+                continue
             return family
     if signals.intersection({"docs", "documentation", "example", "examples", "readme"}):
         if _has_docs_example_verifier(record):
@@ -978,6 +983,32 @@ def _infer_public_task_family(record: dict[str, Any], source_type: str) -> str:
 
 
 def _has_docs_example_verifier(record: dict[str, Any]) -> bool:
+    verifier_types = _explicit_public_verifier_types(record)
+    return bool(
+        verifier_types.intersection({"doctest", "example_command"})
+        or _list_field(record.get("example_commands"))
+        or _list_field(record.get("doctest_commands"))
+    )
+
+
+def _has_family_verifier(record: dict[str, Any], family: str) -> bool:
+    verifier_types = _explicit_public_verifier_types(record)
+    if family == "performance":
+        return bool(
+            verifier_types.intersection({"benchmark_command", "performance_threshold"})
+            or _list_field(record.get("benchmark_commands"))
+            or record.get("performance_threshold") is not None
+        )
+    if family == "repo_understanding":
+        return bool(
+            verifier_types.intersection({"retrieval_evidence", "trace_quality"})
+            or _list_field(record.get("retrieval_requirements"))
+            or record.get("trace_quality_rubric") is not None
+        )
+    return True
+
+
+def _explicit_public_verifier_types(record: dict[str, Any]) -> set[str]:
     verifier_types = {
         _normalize_task_label(value)
         for value in _list_field(record.get("verifier_types"))
@@ -986,11 +1017,7 @@ def _has_docs_example_verifier(record: dict[str, Any]) -> bool:
     candidate_type = _normalize_task_label(candidate.get("type"))
     if candidate_type:
         verifier_types.add(candidate_type)
-    return bool(
-        verifier_types.intersection({"doctest", "example_command"})
-        or _list_field(record.get("example_commands"))
-        or _list_field(record.get("doctest_commands"))
-    )
+    return verifier_types
 
 
 def _normalize_task_label(value: Any) -> str:
@@ -1063,6 +1090,10 @@ def _public_verifier_types(
         verifier_types.add("diff_constraint")
     if record.get("performance_threshold") is not None:
         verifier_types.add("performance_threshold")
+    if _list_field(record.get("retrieval_requirements")):
+        verifier_types.add("retrieval_evidence")
+    if record.get("trace_quality_rubric") is not None:
+        verifier_types.add("trace_quality")
     if patch:
         verifier_types.add("reference_patch")
     if test_patch:

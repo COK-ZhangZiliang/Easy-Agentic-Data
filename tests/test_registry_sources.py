@@ -388,6 +388,68 @@ class RegistrySourceTests(unittest.TestCase):
         self.assertIn("example_command", scenario.query_seed.verifier_types)
         self.assertIn("task_family:docs_examples", scenario.query_seed.coverage_tags)
 
+    def test_public_issue_performance_signal_needs_benchmark_verifier(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "title": "Improve parser performance for long inputs",
+                "labels": ["performance"],
+            },
+            source_format="public-issue",
+            source_name="curated-public-issues",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "bug_repair")
+        self.assertIn("hidden_command", scenario.query_seed.verifier_types)
+        self.assertNotIn("task_family:performance", scenario.query_seed.coverage_tags)
+
+    def test_public_issue_performance_uses_family_with_benchmark_verifier(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "title": "Improve parser performance for long inputs",
+                "labels": ["performance"],
+                "benchmark_commands": ["python benchmarks/parser.py --max-ms 50"],
+            },
+            source_format="public-issue",
+            source_name="curated-public-issues",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "performance")
+        self.assertIn("benchmark_command", scenario.query_seed.verifier_types)
+        self.assertIn("task_family:performance", scenario.query_seed.coverage_tags)
+
+    def test_public_issue_understanding_signal_needs_retrieval_verifier(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "title": "Help explain parser behavior",
+                "labels": ["question"],
+            },
+            source_format="public-issue",
+            source_name="curated-public-issues",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "bug_repair")
+        self.assertIn("hidden_command", scenario.query_seed.verifier_types)
+        self.assertNotIn("task_family:repo_understanding", scenario.query_seed.coverage_tags)
+
+    def test_public_issue_understanding_uses_family_with_retrieval_verifier(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "title": "Help explain parser behavior",
+                "labels": ["question"],
+                "retrieval_requirements": ["cite src/tool/parser.py"],
+            },
+            source_format="public-issue",
+            source_name="curated-public-issues",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "repo_understanding")
+        self.assertIn("retrieval_evidence", scenario.query_seed.verifier_types)
+        self.assertIn("task_family:repo_understanding", scenario.query_seed.coverage_tags)
+
     def test_public_issue_pr_import_skips_ci_records_without_ci_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry = ScenarioRegistry(directory)

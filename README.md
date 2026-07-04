@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-197%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-201%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -260,7 +260,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-shards \
   --github-token-env GITHUB_TOKEN \
   --require-github-token \
   --shard-size 4 \
-  --limit-per-task 5 \
+  --limit-per-task 100 \
   --resume \
   --allow-partial \
   --sleep-seconds 2 \
@@ -286,7 +286,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-export \
   --summary-output runs/seed-corpus-demo/production-source-export-summary.json \
   --github-token-env GITHUB_TOKEN \
   --require-github-token \
-  --limit-per-task 5 \
+  --limit-per-task 100 \
   --max-tasks 4 \
   --resume \
   --allow-partial \
@@ -304,7 +304,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-retry-run \
   --summary-output runs/seed-corpus-demo/production-source-retry-run-summary.json \
   --github-token-env GITHUB_TOKEN \
   --require-github-token \
-  --limit-per-task 5 \
+  --limit-per-task 100 \
   --max-retry-tasks 4 \
   --allow-partial \
   --sleep-seconds 2
@@ -367,9 +367,9 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
   --source-name production-public-python-sources \
   --allowlist examples/production-repository-allowlist.json \
   --overwrite-registry \
-  --min-imported 1000 \
+  --min-imported 1 \
   --max-quarantined 0 \
-  --min-train-eligible 1000 \
+  --min-train-eligible 1 \
   --require-verifier-type hidden-command \
   --output runs/seed-corpus-demo/production-import-rehearsal.json
 

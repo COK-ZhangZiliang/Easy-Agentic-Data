@@ -465,11 +465,15 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
 - [x] Add a clean accepted-output gate to `collection-audit` so quarantined public records can be
   excluded before readiness, split, and import-rehearsal stages while raw quarantine evidence is
   preserved.
-- [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
+- [x] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
-- [ ] Reject or quarantine records with missing licenses, mutable revisions, missing source URIs,
+- [x] Reject or quarantine records with missing licenses, mutable revisions, missing source URIs,
   personal data, credentials, private URLs, or benchmark contamination signals.
+- [x] Run deep authenticated source collection and clean production readiness with at least 1,000
+  accepted non-benchmark public issue, PR, and CI records.
+- [x] Run clean issue/PR and CI import rehearsals from the deep public source collection and fix
+  family inference gaps exposed by seed-audit verifier requirements.
 - [ ] Generate repository-grounded synthetic tasks for under-covered task families using fixed
   repository snapshots and family-appropriate verifier evidence.
 - [ ] Materialize the corpus into `runs/train-registry` or an explicitly configured external data
@@ -499,9 +503,9 @@ Current checkpoint:
 - `examples/production-repository-allowlist.json` records the first ten public Python repository
   candidates with permissive licenses, public Git source URIs, collection sources, labels, stable
   commands, and source-evidence URLs.
-- This checkpoint is not production approval. Ten repositories satisfy the first repository-share
-  threshold for a 1,000-seed corpus, but the allowlist is still Python-only, the current clean
-  authenticated export contains 107 accepted records rather than the 1,000-record target, and
+- This checkpoint is not production approval. The deep authenticated public-source export now
+  exceeds the 1,000-record source-readiness target, but the allowlist is still Python-only and the
+  combined train-registry seed audit still fails production coverage gates, so
   `scale_decision.approved` remains false.
 - `registry collection-export` now turns issue, pull-request, and CI collection-plan tasks into
   normalized public source JSONL. Issue and PR records are trainable-source candidates for the
@@ -555,27 +559,37 @@ Current checkpoint:
   after CI collection support. It added five PR records to the existing two-record probe, but 28
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
   with 7 accepted PR records, no accepted issue or CI records, and no production import approval.
-- The authenticated source collection run processed all 30 planned issue, pull-request, and CI
-  tasks across eight shards. The first pass exposed local CA-bundle failures, and the rerun with
+- The first authenticated source collection run processed all 30 planned issue, pull-request, and
+  CI tasks across eight shards. The first pass exposed local CA-bundle failures, and the rerun with
   `SSL_CERT_FILE` pointing at `certifi` produced 108 raw records with clean shard summaries and no
   unresolved export issues.
-- The raw collection audit quarantined one public PR record because its body contained a local
-  `127.0.0.1` URL. The clean accepted output contains 107 records: 8 `public_issue`, 49
-  `public_pr`, and 50 `public_ci` records across all ten allowlisted repositories.
-- Clean readiness passes a 100-record probe gate with all required source types, zero quarantine,
-  no export issues, and full 30-task plan coverage. The production readiness gate still fails
-  correctly because 107 accepted records is below the configured 1,000-record minimum.
-- Clean issue/PR and CI import rehearsals now pass separately. Issue/PR import accepts 57 records
-  after tightening docs-family inference so docs-labeled records without doctest or example-command
-  evidence do not violate family-specific verifier requirements; CI import accepts 50 records as
-  `ci_build` seeds with hidden-command evidence.
+- The first raw collection audit quarantined one public PR record because its body contained a
+  local `127.0.0.1` URL. The first clean accepted output contained 107 records and passed a
+  100-record probe readiness gate, but it correctly failed the 1,000-record production minimum.
+- The deep authenticated collection pass reran the same 30 tasks with `--limit-per-task 100` into
+  a separate source artifact. All eight deep shards completed, the merged raw export contained
+  1,865 records, and raw audit quarantined 15 records with private or local URLs.
+- The deep clean accepted output contains 1,850 records: 433 `public_issue`, 465 `public_pr`, and
+  952 `public_ci` records across all ten allowlisted repositories. Production
+  `collection-readiness --min-accepted 1000 --max-quarantined 0 --require-clean-export
+  --require-all-plan-tasks` now passes with all required source types and 30/30 plan tasks covered.
+- Clean deep issue/PR and CI import rehearsals now pass separately. Issue/PR import accepts 898
+  records after tightening docs, performance, and repo-understanding family inference so records
+  without family-appropriate verifier evidence do not violate seed-audit requirements; CI import
+  accepts 952 records as `ci_build` seeds with hidden-command evidence.
+- A combined candidate train registry imported all 1,850 clean public records and then ran the
+  production seed-audit gates. Import succeeded, but seed-audit still fails because
+  `docs_examples`, `performance`, and `repo_understanding` are absent; `adversarial_test`,
+  `benchmark_command`, `build_command`, `doctest`, `hidden_test_patch`, and `retrieval_evidence`
+  verifier types are absent; `ci_build` accounts for 53.6% of trainable seeds; `textualize/rich`
+  accounts for 12.5%; and Python accounts for 100% of trainable seeds.
 - `registry collection-shard-status` now reads the deterministic shard runbook plus local
   preflight reports, shard export summaries, and source JSONL, then assigns each shard a next
   action such as `run_preflight`, `run_export`, `resolve_preflight`, `plan_retry`, or
   `inspect_artifact` before merged-summary or readiness decisions.
-- The next data gate is to expand or deepen non-benchmark public source collection until the clean
-  accepted output meets the 1,000-record production minimum, then rerun clean readiness and
-  import-rehearsal gates before any registry materialization or provider rollout.
+- The next data gate is repository-grounded synthetic and cross-language coverage backfill from
+  the measured seed-audit gaps, followed by holdout registry refresh and scenario decontamination
+  before any provider rollout.
 
 Next milestone plan:
 
@@ -604,73 +618,36 @@ Operational sequencing:
 
 Immediate next execution plan:
 
-1. **Authenticated source collection**
-   - Run `collection-shards` once from the production collection plan to freeze shard offsets,
-     per-shard summaries, and preflight/export command arguments before starting authenticated
-     collection.
-   - Run `collection-shard-status` from the shard schedule before and after each shard pass. Use
-     its per-shard `next_action` field as the operational queue: `run_preflight` before local
-     checks, `run_export` after a clean preflight, `resolve_preflight` for missing auth or invalid
-     local inputs, `plan_retry` for partial or failed exports, and `inspect_artifact` for malformed
-     run artifacts.
-   - Run `collection-preflight` before each production shard so missing authentication, empty task
-     selections, invalid plans, malformed source JSONL, or missing resume summaries fail before
-     any networked GitHub request starts.
-   - Run resumable `collection-export` shards with a GitHub token, fixed task offsets, conservative
-     sleep throttling, and `--allow-partial` so rate-limited tasks remain visible in the summary.
-   - Use `--require-github-token --github-token-env GITHUB_TOKEN` for production shards so missing
-     authentication fails before any anonymous GitHub API request is made.
-   - Run `collection-retry-plan` after every shard or combined summary so failed, skipped,
-     missing-outcome, and not-yet-selected tasks are assigned to explicit single-task retry shards.
-   - Run `collection-retry-run` over selected retry tasks so incomplete shards can be resumed from
-     machine-readable retry metadata instead of hand-copied command fragments.
-   - Run `collection-summary` over the final source JSONL, every shard summary, and every retry-run
-     summary before any audit/readiness decision. Treat this merged summary as the only
-     production `collection-readiness --export-summary` input.
-   - Run `collection-audit --accepted-output` after raw collection so records with private/local
-     URLs, non-public source links, mutable revisions, missing licenses, or other quarantine issues
-     are preserved in the raw audit but excluded from the clean source JSONL used downstream.
-   - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
-   - Exit gate: all 30 current plan tasks are represented in the merged summary, resolved retry
-     attempts replace earlier failed shard outcomes, and every remaining failure is assigned to a
-     task ID, repository, source type, retry status, and next action.
+1. **Completed source collection and readiness evidence**
+   - The authenticated deep collection run uses `--limit-per-task 100`, resumable shard exports,
+     clean accepted-output filtering, merged summaries, and the production readiness gate.
+   - Exit evidence: 1,850 clean accepted records, 0 clean quarantine issues, all required
+     `public_issue`, `public_pr`, and `public_ci` source types present, and 30/30 plan tasks
+     covered.
 
-2. **Source audit and readiness**
-   - Run `collection-audit` against the raw exported source JSONL and the checked-in allowlist,
-     then rerun audit against the clean accepted output.
-   - Run `collection-summary` and `collection-readiness` against the clean accepted output with the
-     production minimum, zero quarantine budget, required `public_issue`, `public_pr`, and
-     `public_ci` source types, clean export summaries, and full plan-task coverage.
-   - Exit gate: readiness is true; otherwise the corpus remains a probe and cannot feed registry
-     import or paid DeepSeek V4 Pro synthesis.
+2. **Completed import-rehearsal evidence**
+   - The deep clean source was split into issue/PR and CI shards, then imported through
+     format-specific rehearsal registries.
+   - Exit evidence: 898 issue/PR records and 952 CI records import with allowlist enforcement,
+     registry validation, train eligibility, source-instance IDs, task-family tags, verifier
+     types, and zero quarantine.
 
-3. **Trainable issue/PR import rehearsal**
-   - Use `collection-split` to route `public_issue` and `public_pr` source records away from
-     `public_ci` records before invoking the public issue/PR importer.
-   - Run `import-rehearsal` into a temporary registry with allowlist enforcement, registry
-     validation, seed-audit gates, and explicit quarantine accounting.
-   - Exit gate: imported issue/PR seeds have stable task IDs, fixed revisions, compatible licenses,
-     source-instance IDs, task families, verifier types, train eligibility, and coverage tags.
-
-4. **CI source import and materialization validation**
-   - Use `collection-split` to route `public_ci` source records into a dedicated CI shard, then run
-     `public_ci` import rehearsals separately from issue/PR shards so failed workflow runs are
-     routed through the CI importer instead of the public issue/PR importer.
-   - Use the import-rehearsal materialization gate on sampled CI scenarios from fixed source
-     revisions and confirm their `ci_commands` run as hidden verifier commands in the target
-     workspace.
-   - Exit gate: CI records can be imported, materialized, reset, and verified without passing
-     through the public issue/PR importer.
-
-5. **Coverage backfill and holdout separation**
+3. **Coverage backfill and holdout separation**
    - Use seed-audit gaps from real source import to decide which repository-grounded synthetic
      families are still needed.
+   - Generate repository-grounded synthetic seeds for missing `docs_examples`, `performance`, and
+     `repo_understanding` families with `doctest`, `benchmark_command`, `retrieval_evidence`, and
+     other required verifier evidence instead of relabeling weak public records.
+   - Add non-Python or cross-language trainable sources so the 80% maximum language-share gate can
+     pass without weakening the policy.
+   - Reduce `ci_build`, top-repository, and source-method dominance through targeted backfill and
+     balanced sampling rather than deleting provenance.
    - Build or refresh the holdout registry before scale-up so benchmark and curated evaluation
      sources remain separate from trainable seeds.
    - Exit gate: seed and scenario decontamination pass for query text, provenance, source
      instances, hidden tests, reference artifacts, oracle hashes, and patch/test-patch hashes.
 
-6. **Human review and small provider pilot**
+4. **Human review and small provider pilot**
    - Generate the stratified human-review queue from the candidate train registry and quarantine
      every actionable source-quality, privacy, leakage, or verifier issue.
    - Run a small DeepSeek V4 Pro registry-backed pilot only after source, import, coverage,
@@ -678,7 +655,7 @@ Immediate next execution plan:
    - Exit gate: trace validity, tool success, reward distribution, hard-check failure handling,
      prompt leakage checks, and cost reports justify larger shards.
 
-7. **Manifest freeze for scale-up**
+5. **Manifest freeze for scale-up**
    - Freeze the train registry, holdout registry, source snapshots, prompt/config versions, audit
      outputs, review decisions, pilot selection, provider settings, and scale decision in a
      versioned seed-corpus manifest.
@@ -815,3 +792,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a deterministic source collection shard schedule gate for production runbooks. |
 | 2026-07-03 | Added a source collection shard status gate and updated the detailed production collection plan. |
 | 2026-07-04 | Completed authenticated 30-task source collection, clean accepted-output filtering, readiness probes, and issue/PR plus CI import rehearsals. |
+| 2026-07-04 | Deepened authenticated source collection to 1,850 clean records, passed production source-readiness, reran import rehearsals, and recorded measured seed-audit backfill gaps. |
