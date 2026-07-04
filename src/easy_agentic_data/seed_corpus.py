@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import shlex
 import shutil
 import subprocess
@@ -41,6 +42,7 @@ from easy_agentic_data.scenario_decontamination import (
     audit_scenario_decontamination,
     scenarios_from_registry,
 )
+from easy_agentic_data.scenarios import Scenario
 from easy_agentic_data.seed_library import (
     DEFAULT_BENCHMARK_SOURCE_ALIASES,
     SeedLibraryPolicy,
@@ -54,6 +56,9 @@ SEED_CORPUS_SCHEMA_VERSION = "easy_agentic_data.seed_corpus.v1"
 REGISTRY_IMPORT_REHEARSAL_SCHEMA_VERSION = "easy_agentic_data.registry_import_rehearsal.v1"
 SEED_BACKFILL_PLAN_SCHEMA_VERSION = "easy_agentic_data.seed_backfill_plan.v1"
 SEED_SELECTION_PLAN_SCHEMA_VERSION = "easy_agentic_data.seed_selection_plan.v1"
+SYNTHETIC_BACKFILL_SPEC_SCHEMA_VERSION = (
+    "easy_agentic_data.synthetic_backfill_spec_plan.v1"
+)
 
 
 def build_seed_corpus(
@@ -659,6 +664,76 @@ def build_seed_selection_plan(
         "requires_backfill": bool(reserved["slots"]),
         "ready_for_rollout": ready_for_rollout,
         "valid": True,
+    }
+
+
+def build_synthetic_backfill_spec_plan(
+    scenarios: Iterable[Scenario],
+    selection_plan: dict[str, Any],
+    backfill_plan: dict[str, Any],
+    *,
+    max_repositories: int = 10,
+) -> dict[str, Any]:
+    """Draft repository-grounded synthetic specs from reserved backfill slots."""
+
+    scenario_list = list(scenarios)
+    slots = _repository_synthetic_family_slots(selection_plan, backfill_plan)
+    snapshots = _scenario_repository_snapshots(scenario_list)
+    selected_snapshots = snapshots[: max(0, int(max_repositories))]
+    ready_specs, draft_specs, report = _build_synthetic_backfill_specs(
+        slots,
+        selected_snapshots,
+    )
+    ready_count = _planned_synthetic_count(ready_specs)
+    draft_count = _planned_synthetic_count(draft_specs)
+    issues = []
+    if not slots:
+        issues.append(
+            {
+                "code": "no_repository_synthetic_family_slots",
+                "message": "No repository-grounded synthetic task-family slots were found.",
+                "severity": "warning",
+            }
+        )
+    if slots and not selected_snapshots:
+        issues.append(
+            {
+                "code": "no_fixed_repository_snapshots",
+                "message": "No fixed-revision repository snapshots were available.",
+                "severity": "error",
+            }
+        )
+    if draft_count:
+        issues.append(
+            {
+                "code": "synthetic_evidence_incomplete",
+                "message": (
+                    f"{draft_count} planned synthetic records still require verifier "
+                    "evidence before generation."
+                ),
+                "severity": "warning",
+            }
+        )
+    return {
+        "schema_version": SYNTHETIC_BACKFILL_SPEC_SCHEMA_VERSION,
+        "inputs": {
+            "candidate_scenarios": len(scenario_list),
+            "repository_snapshots": len(snapshots),
+            "selected_repository_snapshots": len(selected_snapshots),
+            "max_repositories": max(0, int(max_repositories)),
+            "selection_plan_hash": _stable_json_sha256(selection_plan),
+            "backfill_plan_hash": _stable_json_sha256(backfill_plan),
+        },
+        "family_slots": slots,
+        "repository_snapshots": selected_snapshots,
+        "generator_ready_specs": {"repositories": ready_specs},
+        "draft_specs": {"repositories": draft_specs},
+        "evidence_report": report,
+        "planned_ready_records": ready_count,
+        "planned_draft_records": draft_count,
+        "ready_to_generate": bool(ready_count and not draft_count),
+        "issues": issues,
+        "valid": not any(issue["severity"] == "error" for issue in issues),
     }
 
 
@@ -1608,6 +1683,284 @@ def _selection_plan_issues(
             }
         )
     return issues
+
+
+def _repository_synthetic_family_slots(
+    selection_plan: dict[str, Any],
+    backfill_plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    slots = []
+    seen: set[str] = set()
+    for slot in _dict_list(_dict(selection_plan.get("reserved_backfill")).get("slots")):
+        if slot.get("type") != "task_family_minimum":
+            continue
+        family = _normalize_label(slot.get("target"))
+        if not family or family == "bug_repair":
+            continue
+        if family not in TASK_FAMILY_VERIFIER_TEMPLATES:
+            continue
+        amount = max(0, int(slot.get("minimum_count", 0) or 0))
+        if amount <= 0:
+            continue
+        slots.append(
+            {
+                "task_family": family,
+                "minimum_count": amount,
+                "accepted_verifier_types": slot.get("accepted_verifier_types", []),
+                "source": "selection_plan_reserved_backfill",
+            }
+        )
+        seen.add(family)
+    if slots:
+        return sorted(slots, key=lambda item: item["task_family"])
+
+    for gap in _dict_list(_dict(backfill_plan.get("gaps")).get("task_family")):
+        family = _normalize_label(gap.get("target"))
+        if not family or family == "bug_repair" or family in seen:
+            continue
+        if family not in TASK_FAMILY_VERIFIER_TEMPLATES:
+            continue
+        amount = max(0, int(gap.get("shortfall", 0) or 0))
+        if amount <= 0:
+            continue
+        slots.append(
+            {
+                "task_family": family,
+                "minimum_count": amount,
+                "accepted_verifier_types": gap.get("accepted_verifier_types", []),
+                "source": "backfill_plan_task_family_gap",
+            }
+        )
+    return sorted(slots, key=lambda item: item["task_family"])
+
+
+def _scenario_repository_snapshots(scenarios: list[Scenario]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for scenario in scenarios:
+        seed = scenario.query_seed
+        environment = scenario.environment
+        repository = _seed_repository_value(seed)
+        revision = str(environment.source_revision or "").strip().lower()
+        if not repository or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            continue
+        source_uri = str(environment.source_uri or "").strip()
+        if not source_uri:
+            continue
+        key = (repository, revision)
+        snapshot = by_key.setdefault(
+            key,
+            {
+                "repository": repository,
+                "source_uri": source_uri,
+                "source_revision": revision,
+                "license": seed.license,
+                "language": _seed_language_value(seed),
+                "image_digest": environment.image_digest,
+                "working_directory": environment.working_directory,
+                "setup_commands": list(environment.setup_commands),
+                "health_check": list(environment.health_check),
+                "hidden_tests": [],
+                "source_instance_ids": [],
+                "source_urls": [],
+            },
+        )
+        _extend_unique(snapshot["hidden_tests"], scenario.hidden_evaluator.hidden_tests)
+        source_instance = seed.public.context.get("source_instance_id") or seed.metadata.get(
+            "source_instance_id",
+            "",
+        )
+        source_url = seed.public.context.get("source_url") or seed.metadata.get("source_url", "")
+        if source_instance:
+            _extend_unique(snapshot["source_instance_ids"], [str(source_instance)])
+        if source_url:
+            _extend_unique(snapshot["source_urls"], [str(source_url)])
+    snapshots = list(by_key.values())
+    for snapshot in snapshots:
+        snapshot["hidden_tests"] = sorted(snapshot["hidden_tests"])
+        snapshot["source_instance_ids"] = sorted(snapshot["source_instance_ids"])[:5]
+        snapshot["source_urls"] = sorted(snapshot["source_urls"])[:5]
+    return sorted(
+        snapshots,
+        key=lambda item: (
+            item["repository"],
+            item["source_revision"],
+        ),
+    )
+
+
+def _build_synthetic_backfill_specs(
+    slots: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    ready_specs: list[dict[str, Any]] = []
+    draft_specs: list[dict[str, Any]] = []
+    report: dict[str, Any] = {}
+    if not snapshots:
+        for slot in slots:
+            family = str(slot["task_family"])
+            report[family] = {
+                "planned": int(slot["minimum_count"]),
+                "generator_ready": 0,
+                "draft": int(slot["minimum_count"]),
+                "missing_evidence": ["fixed_repository_snapshot"],
+            }
+        return ready_specs, draft_specs, report
+
+    for slot in slots:
+        family = str(slot["task_family"])
+        count = int(slot["minimum_count"])
+        ready_targets_by_repo: dict[str, list[dict[str, Any]]] = {}
+        draft_targets_by_repo: dict[str, list[dict[str, Any]]] = {}
+        missing: Counter[str] = Counter()
+        for index in range(count):
+            snapshot = snapshots[index % len(snapshots)]
+            target, target_missing = _synthetic_backfill_target(
+                snapshot,
+                family=family,
+                index=index,
+            )
+            spec_key = _snapshot_key(snapshot)
+            if target_missing:
+                missing.update(target_missing)
+                draft_targets_by_repo.setdefault(spec_key, []).append(target)
+            else:
+                ready_targets_by_repo.setdefault(spec_key, []).append(target)
+        ready_specs.extend(
+            _specs_for_targets(family, snapshots, ready_targets_by_repo, generator_ready=True)
+        )
+        draft_specs.extend(
+            _specs_for_targets(family, snapshots, draft_targets_by_repo, generator_ready=False)
+        )
+        report[family] = {
+            "planned": count,
+            "generator_ready": sum(len(targets) for targets in ready_targets_by_repo.values()),
+            "draft": sum(len(targets) for targets in draft_targets_by_repo.values()),
+            "missing_evidence": dict(sorted(missing.items())),
+            "accepted_verifier_types": slot.get("accepted_verifier_types", []),
+        }
+    return ready_specs, draft_specs, report
+
+
+def _synthetic_backfill_target(
+    snapshot: dict[str, Any],
+    *,
+    family: str,
+    index: int,
+) -> tuple[dict[str, Any], list[str]]:
+    missing: list[str] = []
+    paths = _synthetic_backfill_paths(snapshot, family)
+    hidden_tests = list(snapshot.get("hidden_tests", []))
+    target = {
+        "name": f"{family}-{index:04d}-{snapshot['repository'].replace('/', '__')}",
+        "paths": paths,
+        "source_instances": list(snapshot.get("source_instance_ids", [])),
+        "source_urls": list(snapshot.get("source_urls", [])),
+        "difficulty": 3,
+    }
+    if hidden_tests:
+        target["test_commands"] = hidden_tests
+        target["ci_commands"] = hidden_tests
+        target["build_commands"] = hidden_tests
+        target["migration_commands"] = hidden_tests
+        target["adversarial_tests"] = hidden_tests if family == "security_hardening" else []
+    else:
+        missing.append("hidden_command")
+
+    if family == "docs_examples":
+        missing.append("doctest_or_example_command")
+    elif family == "performance":
+        missing.append("benchmark_command_or_performance_threshold")
+    elif family == "repo_understanding":
+        target["retrieval_requirements"] = [
+            f"cite {path}" for path in paths if path
+        ] or ["cite inspected repository files"]
+        target["trace_quality_rubric"] = [
+            "The trace must cite inspected repository files before answering.",
+            "The final answer must distinguish observed files from assumptions.",
+        ]
+    elif family == "code_review":
+        target["diff_constraints"] = [
+            "address only the requested review scope",
+            "avoid unrelated formatting or dependency changes",
+        ]
+    elif family == "refactor":
+        target["forbidden_state"] = {
+            "forbidden_regex": ["public API rename without compatibility shim"]
+        }
+    return target, missing
+
+
+def _synthetic_backfill_paths(snapshot: dict[str, Any], family: str) -> list[str]:
+    repository = str(snapshot.get("repository", ""))
+    default_paths = {
+        "docs_examples": ["README.md", "docs/"],
+        "performance": ["src/", "tests/", "benchmarks/"],
+        "repo_understanding": ["README.md", "pyproject.toml"],
+        "test_authoring": ["tests/"],
+        "refactor": ["src/", "tests/"],
+        "migration": ["pyproject.toml", "src/", "tests/"],
+        "security_hardening": ["src/", "tests/"],
+        "code_review": ["src/", "tests/"],
+    }
+    paths = list(default_paths.get(family, ["src/", "tests/"]))
+    if repository.endswith("/rich") and family == "docs_examples":
+        paths = ["README.md", "docs/"]
+    return paths
+
+
+def _specs_for_targets(
+    family: str,
+    snapshots: list[dict[str, Any]],
+    targets_by_repo: dict[str, list[dict[str, Any]]],
+    *,
+    generator_ready: bool,
+) -> list[dict[str, Any]]:
+    snapshots_by_key = {_snapshot_key(snapshot): snapshot for snapshot in snapshots}
+    specs = []
+    for key, targets in sorted(targets_by_repo.items()):
+        snapshot = snapshots_by_key[key]
+        specs.append(
+            {
+                "repository": snapshot["repository"],
+                "source_uri": snapshot["source_uri"],
+                "source_revision": snapshot["source_revision"],
+                "license": snapshot["license"],
+                "language": snapshot["language"],
+                "image_digest": snapshot["image_digest"],
+                "working_directory": snapshot["working_directory"],
+                "setup_commands": snapshot["setup_commands"],
+                "health_check": snapshot["health_check"],
+                "task_families": [family],
+                "generator_ready": generator_ready,
+                "targets": targets,
+            }
+        )
+    return specs
+
+
+def _snapshot_key(snapshot: dict[str, Any]) -> str:
+    return f"{snapshot['repository']}@{snapshot['source_revision']}"
+
+
+def _planned_synthetic_count(specs: list[dict[str, Any]]) -> int:
+    total = 0
+    for spec in specs:
+        total += len(spec.get("targets", [])) * len(spec.get("task_families", []))
+    return total
+
+
+def _stable_json_sha256(value: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _extend_unique(values: list[str], additions: Iterable[str]) -> None:
+    seen = set(values)
+    for item in additions:
+        if item and item not in seen:
+            values.append(item)
+            seen.add(item)
 
 
 def _dimension_counts(

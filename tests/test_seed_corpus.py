@@ -9,12 +9,15 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from easy_agentic_data.cli import main
+from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.registry import ScenarioRegistry
 from easy_agentic_data.repository_synthetic import DEFAULT_REPOSITORY_SYNTHETIC_TASK_FAMILIES
+from easy_agentic_data.scenarios import HiddenEvaluatorContext, Scenario
 from easy_agentic_data.seed_corpus import (
     build_seed_backfill_plan,
     build_seed_corpus,
     build_seed_selection_plan,
+    build_synthetic_backfill_spec_plan,
     rehearse_registry_import,
 )
 from easy_agentic_data.seed_library import SUPPORTED_TASK_FAMILIES, SeedLibraryPolicy
@@ -199,6 +202,95 @@ class SeedCorpusTests(unittest.TestCase):
             self.assertEqual(payload, disk_payload)
             self.assertEqual(payload["candidate_train_eligible"], 2)
             self.assertTrue(payload["requires_backfill"])
+
+    def test_synthetic_backfill_spec_plan_splits_ready_and_draft_specs(self) -> None:
+        selection_plan = _synthetic_backfill_selection_plan()
+        backfill_plan = _synthetic_backfill_plan()
+
+        plan = build_synthetic_backfill_spec_plan(
+            [_synthetic_source_scenario("repo/a"), _synthetic_source_scenario("repo/b")],
+            selection_plan,
+            backfill_plan,
+            max_repositories=2,
+        )
+        report = plan["evidence_report"]
+
+        self.assertTrue(plan["valid"])
+        self.assertFalse(plan["ready_to_generate"])
+        self.assertEqual(plan["planned_ready_records"], 3)
+        self.assertEqual(plan["planned_draft_records"], 3)
+        self.assertEqual(report["code_review"]["generator_ready"], 1)
+        self.assertEqual(report["test_authoring"]["generator_ready"], 2)
+        self.assertEqual(report["docs_examples"]["draft"], 2)
+        self.assertIn("doctest_or_example_command", report["docs_examples"]["missing_evidence"])
+        self.assertEqual(report["performance"]["draft"], 1)
+        ready_families = {
+            spec["task_families"][0]
+            for spec in plan["generator_ready_specs"]["repositories"]
+        }
+        self.assertEqual(ready_families, {"code_review", "test_authoring"})
+
+    def test_synthetic_backfill_spec_plan_can_use_backfill_plan_without_selection_slots(
+        self,
+    ) -> None:
+        plan = build_synthetic_backfill_spec_plan(
+            [_synthetic_source_scenario("repo/a")],
+            {"reserved_backfill": {"slots": []}},
+            {
+                "gaps": {
+                    "task_family": [
+                        {"target": "test_authoring", "shortfall": 2},
+                    ]
+                }
+            },
+        )
+
+        self.assertTrue(plan["valid"])
+        self.assertEqual(plan["planned_ready_records"], 2)
+        self.assertEqual(plan["family_slots"][0]["source"], "backfill_plan_task_family_gap")
+
+    def test_cli_synthetic_backfill_spec_writes_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_root = root / "registry"
+            output = root / "synthetic-backfill.json"
+            spec_output = root / "ready-spec.json"
+            selection_path = root / "selection.json"
+            backfill_path = root / "backfill.json"
+            registry = ScenarioRegistry(registry_root)
+            registry.add_scenario(_synthetic_source_scenario("repo/a"))
+            selection_path.write_text(
+                json.dumps(_synthetic_backfill_selection_plan()),
+                encoding="utf-8",
+            )
+            backfill_path.write_text(json.dumps(_synthetic_backfill_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "seed-synthetic-backfill-spec",
+                        "--root",
+                        str(registry_root),
+                        "--selection-plan",
+                        str(selection_path),
+                        "--backfill-plan",
+                        str(backfill_path),
+                        "--output",
+                        str(output),
+                        "--spec-output",
+                        str(spec_output),
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            disk_payload = json.loads(output.read_text(encoding="utf-8"))
+            ready_spec = json.loads(spec_output.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload, disk_payload)
+            self.assertEqual(ready_spec, payload["generator_ready_specs"])
+            self.assertGreater(payload["planned_ready_records"], 0)
 
     def test_cli_build_seed_corpus_fails_when_budget_is_unmet(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -767,6 +859,72 @@ def _selection_policy() -> dict[str, object]:
             "min_source_method_counts": {"repository_grounded_synthetic": 2},
             "min_verifier_type_counts": {"doctest": 2},
         },
+    }
+
+
+def _synthetic_source_scenario(repository: str) -> Scenario:
+    seed = QuerySeed(
+        PublicTaskContext(
+            f"Improve {repository}.",
+            context={
+                "repository": repository,
+                "source_instance_id": f"{repository.replace('/', '__')}-issue-1",
+                "source_url": f"https://github.com/{repository}/issues/1",
+            },
+        ),
+        license="MIT",
+        task_family="bug_repair",
+        source_method="public_issue_workspace",
+        verifier_types=["hidden_command"],
+        coverage_tags=["language:python", f"repo:{repository}"],
+        metadata={"repository": repository, "language": "Python"},
+    )
+    environment = EnvironmentSpec(
+        name=repository.replace("/", "__"),
+        version="1",
+        source_uri=f"https://github.com/{repository}.git",
+        source_revision="a" * 40,
+        image_digest=PINNED_IMAGE,
+        working_directory="/workspace",
+    )
+    return Scenario(
+        query_seed=seed,
+        environment=environment,
+        hidden_evaluator=HiddenEvaluatorContext(hidden_tests=["python -m pytest tests"]),
+    )
+
+
+def _synthetic_backfill_selection_plan() -> dict[str, object]:
+    return {
+        "reserved_backfill": {
+            "slots": [
+                {"type": "task_family_minimum", "target": "code_review", "minimum_count": 1},
+                {
+                    "type": "task_family_minimum",
+                    "target": "docs_examples",
+                    "minimum_count": 2,
+                },
+                {"type": "task_family_minimum", "target": "performance", "minimum_count": 1},
+                {
+                    "type": "task_family_minimum",
+                    "target": "test_authoring",
+                    "minimum_count": 2,
+                },
+            ]
+        }
+    }
+
+
+def _synthetic_backfill_plan() -> dict[str, object]:
+    return {
+        "gaps": {
+            "task_family": [
+                {"target": "code_review", "shortfall": 1},
+                {"target": "docs_examples", "shortfall": 2},
+                {"target": "performance", "shortfall": 1},
+                {"target": "test_authoring", "shortfall": 2},
+            ]
+        }
     }
 
 

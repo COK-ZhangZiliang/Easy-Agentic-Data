@@ -87,6 +87,7 @@ from easy_agentic_data.seed_corpus import (
     build_seed_backfill_plan,
     build_seed_corpus,
     build_seed_selection_plan,
+    build_synthetic_backfill_spec_plan,
     rehearse_registry_import,
 )
 from easy_agentic_data.seed_review import build_seed_review_queue
@@ -300,6 +301,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     seed_selection_parser.add_argument("--policy", required=True)
     seed_selection_parser.add_argument("--target-train-eligible", type=int)
     seed_selection_parser.add_argument("--output", default="")
+    synthetic_backfill_parser = registry_subparsers.add_parser("seed-synthetic-backfill-spec")
+    synthetic_backfill_parser.add_argument("--root", required=True)
+    synthetic_backfill_parser.add_argument("--selection-plan", required=True)
+    synthetic_backfill_parser.add_argument("--backfill-plan", required=True)
+    synthetic_backfill_parser.add_argument("--max-repositories", type=int, default=10)
+    synthetic_backfill_parser.add_argument("--output", default="")
+    synthetic_backfill_parser.add_argument("--spec-output", default="")
     import_rehearsal_parser = registry_subparsers.add_parser("import-rehearsal")
     import_rehearsal_parser.add_argument("--root", required=True)
     import_rehearsal_parser.add_argument("--source", required=True)
@@ -1076,6 +1084,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Path(args.output).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.output).write_text(
                     json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-backfill-spec":
+            payload = build_synthetic_backfill_spec_plan(
+                scenarios_from_registry(ScenarioRegistry(args.root)),
+                json.loads(Path(args.selection_plan).read_text(encoding="utf-8")),
+                json.loads(Path(args.backfill_plan).read_text(encoding="utf-8")),
+                max_repositories=args.max_repositories,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            if args.spec_output:
+                Path(args.spec_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.spec_output).write_text(
+                    json.dumps(payload["generator_ready_specs"], indent=2, sort_keys=True)
+                    + "\n",
                     encoding="utf-8",
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))

@@ -603,6 +603,17 @@ Current checkpoint:
   reduces `ci_build` from 991 to 168 and top-repository counts to at most 87, but
   `ready_for_rollout` remains false until the reserved synthetic/cross-language seeds are
   materialized, audited, reviewed, and decontaminated.
+- `registry seed-synthetic-backfill-spec` now converts reserved repository-grounded family slots
+  into generator-ready and draft synthetic specs from fixed-revision candidate snapshots. On the
+  current deep candidate registry it found 817 fixed repository snapshots, used 10 snapshots for a
+  balanced backfill spec, and planned 395 synthetic family records. Of those, 280 are
+  generator-ready (`code_review` 33, `migration` 33, `refactor` 56, `repo_understanding` 50,
+  `security_hardening` 37, and `test_authoring` 71) and 115 remain draft because
+  `docs_examples` still needs 75 doctest or executable-example commands and `performance` still
+  needs 40 benchmark commands or thresholds. The generator-ready spec smoke generated 280
+  synthetic scenarios with zero skips in a temporary registry, but these records still require
+  import into the candidate corpus, seed audit, review sampling, and decontamination before
+  provider rollout.
 - `registry collection-shard-status` now reads the deterministic shard runbook plus local
   preflight reports, shard export summaries, and source JSONL, then assigns each shard a next
   action such as `run_preflight`, `run_export`, `resolve_preflight`, `plan_retry`, or
@@ -659,6 +670,8 @@ Immediate next execution plan:
    - Generate repository-grounded synthetic seeds for missing `docs_examples`, `performance`, and
      `repo_understanding` families with `doctest`, `benchmark_command`, `retrieval_evidence`, and
      other required verifier evidence instead of relabeling weak public records.
+   - Use `registry seed-synthetic-backfill-spec` to separate generator-ready backfill specs from
+     draft specs that still need doctest, executable-example, benchmark, or threshold evidence.
    - Add non-Python or cross-language trainable sources so the 80% maximum language-share gate can
      pass without weakening the policy.
    - Use `registry seed-selection-plan` to reduce `ci_build`, top-repository, and source-method
@@ -816,3 +829,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-04 | Deepened authenticated source collection to 1,850 clean records, passed production source-readiness, reran import rehearsals, and recorded measured seed-audit backfill gaps. |
 | 2026-07-04 | Added a seed backfill planning gate that turns failed seed-audit coverage, verifier, language, repository, and family-share gaps into a deterministic runbook before synthetic generation. |
 | 2026-07-04 | Added a seed selection planning gate that keeps raw candidates intact, selects a balanced existing slice, and reserves explicit synthetic and cross-language backfill slots before rollout. |
+| 2026-07-04 | Added a synthetic backfill spec gate that emits generator-ready repository-grounded specs separately from draft docs/performance specs that still need verifier evidence. |
