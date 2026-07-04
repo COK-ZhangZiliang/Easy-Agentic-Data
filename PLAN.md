@@ -462,6 +462,9 @@ larger DeepSeek V4 Pro synthesis runs without invalidating held-out benchmark ev
   source-type mix, output paths, and exact preflight/export arguments for production collection.
 - [x] Add a collection-shard-status gate that reads shard schedules, preflight reports, export
   summaries, and source JSONL to report per-shard next actions before summary/readiness.
+- [x] Add a clean accepted-output gate to `collection-audit` so quarantined public records can be
+  excluded before readiness, split, and import-rehearsal stages while raw quarantine evidence is
+  preserved.
 - [ ] Collect public issue and PR records from allowlisted repositories, including title/body,
   labels, source URLs, fixed base commits, license, language, candidate verifier commands, and
   source-instance IDs.
@@ -497,8 +500,9 @@ Current checkpoint:
   candidates with permissive licenses, public Git source URIs, collection sources, labels, stable
   commands, and source-evidence URLs.
 - This checkpoint is not production approval. Ten repositories satisfy the first repository-share
-  threshold for a 1,000-seed corpus, but the allowlist is still Python-only, exported public records
-  have not yet been collected, and `scale_decision.approved` remains false.
+  threshold for a 1,000-seed corpus, but the allowlist is still Python-only, the current clean
+  authenticated export contains 107 accepted records rather than the 1,000-record target, and
+  `scale_decision.approved` remains false.
 - `registry collection-export` now turns issue, pull-request, and CI collection-plan tasks into
   normalized public source JSONL. Issue and PR records are trainable-source candidates for the
   public issue/PR importer, while CI records are trainable-source candidates for the public CI
@@ -515,6 +519,9 @@ Current checkpoint:
   the final source JSONL plus all collection-export and collection-retry-run summaries. The final
   JSONL is the record-count source of truth, while task outcomes from later retry summaries replace
   earlier failed shard outcomes so resolved rate-limit failures do not block a clean gate.
+- `registry collection-audit --accepted-output` now writes a clean accepted-record JSONL while
+  preserving raw quarantine evidence. Downstream readiness, split, and import-rehearsal gates can
+  consume the clean JSONL so a quarantined public record cannot silently enter trainable sources.
 - `registry collection-preflight` now checks the collection plan, selected shard, optional existing
   source JSONL, optional summary files, and required GitHub authentication before networked source
   export begins. It records only whether the named token environment variable is configured, never
@@ -548,24 +555,27 @@ Current checkpoint:
   after CI collection support. It added five PR records to the existing two-record probe, but 28
   GitHub requests still hit HTTP 403 rate limits. The current source collection remains a probe
   with 7 accepted PR records, no accepted issue or CI records, and no production import approval.
-- The current authenticated collection preflight refreshed the production allowlist audit and
-  30-task collection plan, then stopped locally because `GITHUB_TOKEN` is not set. The preflight
-  report now exposes that blocker before export, and the generated retry plan keeps every task
-  visible: four selected tasks are marked `missing_task_outcome` and the remaining 26 tasks are
-  marked `not_selected`.
-- The deterministic production shard schedule now splits the 30 collection tasks into eight
-  authenticated shards with stable preflight and export command arguments. The first scheduled
-  shard preflight was executed and stopped locally before network access because `GITHUB_TOKEN` is
-  not set.
+- The authenticated source collection run processed all 30 planned issue, pull-request, and CI
+  tasks across eight shards. The first pass exposed local CA-bundle failures, and the rerun with
+  `SSL_CERT_FILE` pointing at `certifi` produced 108 raw records with clean shard summaries and no
+  unresolved export issues.
+- The raw collection audit quarantined one public PR record because its body contained a local
+  `127.0.0.1` URL. The clean accepted output contains 107 records: 8 `public_issue`, 49
+  `public_pr`, and 50 `public_ci` records across all ten allowlisted repositories.
+- Clean readiness passes a 100-record probe gate with all required source types, zero quarantine,
+  no export issues, and full 30-task plan coverage. The production readiness gate still fails
+  correctly because 107 accepted records is below the configured 1,000-record minimum.
+- Clean issue/PR and CI import rehearsals now pass separately. Issue/PR import accepts 57 records
+  after tightening docs-family inference so docs-labeled records without doctest or example-command
+  evidence do not violate family-specific verifier requirements; CI import accepts 50 records as
+  `ci_build` seeds with hidden-command evidence.
 - `registry collection-shard-status` now reads the deterministic shard runbook plus local
   preflight reports, shard export summaries, and source JSONL, then assigns each shard a next
   action such as `run_preflight`, `run_export`, `resolve_preflight`, `plan_retry`, or
   `inspect_artifact` before merged-summary or readiness decisions.
-- The next data gate is to run authenticated production source-collection shards with
-  `collection-export`, resolve retries with `collection-retry-plan` and `collection-retry-run`,
-  merge the final shard state with `collection-summary`, then run `collection-audit`,
-  `collection-readiness`, and `import-rehearsal` before any registry materialization or provider
-  rollout.
+- The next data gate is to expand or deepen non-benchmark public source collection until the clean
+  accepted output meets the 1,000-record production minimum, then rerun clean readiness and
+  import-rehearsal gates before any registry materialization or provider rollout.
 
 Next milestone plan:
 
@@ -617,16 +627,20 @@ Immediate next execution plan:
    - Run `collection-summary` over the final source JSONL, every shard summary, and every retry-run
      summary before any audit/readiness decision. Treat this merged summary as the only
      production `collection-readiness --export-summary` input.
+   - Run `collection-audit --accepted-output` after raw collection so records with private/local
+     URLs, non-public source links, mutable revisions, missing licenses, or other quarantine issues
+     are preserved in the raw audit but excluded from the clean source JSONL used downstream.
    - Keep the combined source JSONL under `runs/seed-corpus-demo/` until readiness passes.
    - Exit gate: all 30 current plan tasks are represented in the merged summary, resolved retry
      attempts replace earlier failed shard outcomes, and every remaining failure is assigned to a
      task ID, repository, source type, retry status, and next action.
 
 2. **Source audit and readiness**
-   - Run `collection-audit` against the exported source JSONL and the checked-in allowlist.
-   - Run `collection-readiness` with the merged export summary, production minimum, zero quarantine
-     budget, required `public_issue`, `public_pr`, and `public_ci` source types, clean export
-     summaries, and full plan-task coverage.
+   - Run `collection-audit` against the raw exported source JSONL and the checked-in allowlist,
+     then rerun audit against the clean accepted output.
+   - Run `collection-summary` and `collection-readiness` against the clean accepted output with the
+     production minimum, zero quarantine budget, required `public_issue`, `public_pr`, and
+     `public_ci` source types, clean export summaries, and full plan-task coverage.
    - Exit gate: readiness is true; otherwise the corpus remains a probe and cannot feed registry
      import or paid DeepSeek V4 Pro synthesis.
 
@@ -800,3 +814,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-03 | Added a source collection preflight gate for plan, shard, token, source, and summary checks before networked exports. |
 | 2026-07-03 | Added a deterministic source collection shard schedule gate for production runbooks. |
 | 2026-07-03 | Added a source collection shard status gate and updated the detailed production collection plan. |
+| 2026-07-04 | Completed authenticated 30-task source collection, clean accepted-output filtering, readiness probes, and issue/PR plus CI import rehearsals. |

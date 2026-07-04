@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-193%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-197%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -319,12 +319,25 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-summary \
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
   --source runs/seed-corpus-demo/production-public-source-records.jsonl \
   --allowlist examples/production-repository-allowlist.json \
-  --output runs/seed-corpus-demo/production-source-collection-audit.json
+  --output runs/seed-corpus-demo/production-source-collection-audit.json \
+  --accepted-output runs/seed-corpus-demo/production-public-source-records-clean.jsonl
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
+  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
+  --allowlist examples/production-repository-allowlist.json \
+  --output runs/seed-corpus-demo/production-source-collection-audit-clean.json
+
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-summary \
+  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
+  --summary runs/seed-corpus-demo/production-source-export-summary.json \
+  --summary runs/seed-corpus-demo/production-source-retry-run-summary.json \
+  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
+  --output runs/seed-corpus-demo/production-source-merged-summary-clean.json
 
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
   --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --export-summary runs/seed-corpus-demo/production-source-merged-summary.json \
-  --audit runs/seed-corpus-demo/production-source-collection-audit.json \
+  --export-summary runs/seed-corpus-demo/production-source-merged-summary-clean.json \
+  --audit runs/seed-corpus-demo/production-source-collection-audit-clean.json \
   --min-accepted 1000 \
   --max-quarantined 0 \
   --require-source-type public_issue \
@@ -335,21 +348,21 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
   --output runs/seed-corpus-demo/production-source-readiness.json
 
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-split \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --output runs/seed-corpus-demo/production-public-issue-pr-source-records.jsonl \
-  --summary-output runs/seed-corpus-demo/production-public-issue-pr-source-summary.json \
+  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
+  --output runs/seed-corpus-demo/production-public-issue-pr-source-records-clean.jsonl \
+  --summary-output runs/seed-corpus-demo/production-public-issue-pr-source-summary-clean.json \
   --include-source-type public_issue \
   --include-source-type public_pr
 
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-split \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --output runs/seed-corpus-demo/production-public-ci-source-records.jsonl \
-  --summary-output runs/seed-corpus-demo/production-public-ci-source-summary.json \
+  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
+  --output runs/seed-corpus-demo/production-public-ci-source-records-clean.jsonl \
+  --summary-output runs/seed-corpus-demo/production-public-ci-source-summary-clean.json \
   --include-source-type public_ci
 
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
   --root runs/seed-corpus-demo/production-import-rehearsal \
-  --source runs/seed-corpus-demo/production-public-issue-pr-source-records.jsonl \
+  --source runs/seed-corpus-demo/production-public-issue-pr-source-records-clean.jsonl \
   --format public-issue-pr \
   --source-name production-public-python-sources \
   --allowlist examples/production-repository-allowlist.json \
@@ -362,7 +375,7 @@ PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
 
 PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
   --root runs/seed-corpus-demo/production-ci-import-rehearsal \
-  --source runs/seed-corpus-demo/production-public-ci-source-records.jsonl \
+  --source runs/seed-corpus-demo/production-public-ci-source-records-clean.jsonl \
   --format public-ci \
   --source-name production-public-python-ci \
   --allowlist examples/production-repository-allowlist.json \
@@ -401,14 +414,19 @@ rate-limited run can continue from machine-readable retry metadata instead of ha
 commands. `collection-summary` then rebuilds a readiness-compatible export summary from the final
 source JSONL plus every export and retry-run summary. The final JSONL is the record-count source of
 truth, so resumed shards and retries cannot double-count records, while unresolved task failures
-remain visible before readiness. CI collection tasks export
+remain visible before readiness. `collection-audit --accepted-output` preserves the raw audit and
+also writes a clean JSONL containing only records that pass allowlist, fixed-revision, license,
+public-URL, and private-data checks. If any record is quarantined, the raw audit exits nonzero while
+still writing the clean accepted output for follow-up readiness and import rehearsal gates. CI
+collection tasks export
 `public_ci` records from failed workflow runs with fixed head SHAs and `ci_commands` verifier
 evidence. Import issue/PR and CI records through their matching formats: the public issue/PR
 importer still rejects CI records, while `--format public-ci` maps CI commands to hidden verifier
 commands for `ci_build` seeds. `collection-readiness` combines the collection plan, merged export
 summary, and audit output into the registry-import gate: small probes can lower `--min-accepted`,
-while production runs should require the policy target, issue, PR, and CI records, clean merged
-summaries, and full plan-task coverage. `collection-split` then routes the mixed export into
+while production runs should require the policy target, issue, PR, and CI records, the clean merged
+summary, zero quarantine in the clean audit, and full plan-task coverage. `collection-split` then
+routes the clean mixed export into
 importer-specific shards so issue/PR and CI rehearsals cannot accidentally consume each other's
 record types. `import-rehearsal` imports each audited trainable source shard into a temporary
 registry, applies the allowlist, runs registry validation and seed-audit gates, and writes a

@@ -964,15 +964,33 @@ def _infer_public_task_family(record: dict[str, Any], source_type: str) -> str:
         ("test_authoring", {"test", "tests", "coverage", "flaky"}),
         ("refactor", {"refactor", "cleanup", "simplify"}),
         ("feature_implementation", {"feature", "enhancement", "api"}),
-        ("docs_examples", {"docs", "documentation", "example", "examples", "readme"}),
         ("repo_understanding", {"question", "help", "explain", "investigate"}),
     )
     for family, terms in mapping:
         if signals.intersection(terms):
             return family
+    if signals.intersection({"docs", "documentation", "example", "examples", "readme"}):
+        if _has_docs_example_verifier(record):
+            return "docs_examples"
     if source_type == "public_pr":
         return "code_review"
     return "bug_repair"
+
+
+def _has_docs_example_verifier(record: dict[str, Any]) -> bool:
+    verifier_types = {
+        _normalize_task_label(value)
+        for value in _list_field(record.get("verifier_types"))
+    }
+    candidate = _dict_field(record.get("candidate_verifier"))
+    candidate_type = _normalize_task_label(candidate.get("type"))
+    if candidate_type:
+        verifier_types.add(candidate_type)
+    return bool(
+        verifier_types.intersection({"doctest", "example_command"})
+        or _list_field(record.get("example_commands"))
+        or _list_field(record.get("doctest_commands"))
+    )
 
 
 def _normalize_task_label(value: Any) -> str:

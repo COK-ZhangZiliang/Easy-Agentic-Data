@@ -832,14 +832,14 @@ def summarize_source_collection_shard_status(
             allow_partial = bool(export_payload.get("allow_partial"))
             if blocking_issues:
                 export_state = "blocked"
+            elif export_issue_texts and allow_partial:
+                export_state = "partial"
+            elif export_issue_texts:
+                export_state = "failed"
             elif bool(export_payload.get("valid")) or (
                 selected_tasks > 0 and processed_tasks >= selected_tasks and not export_issue_texts
             ):
                 export_state = "complete"
-            elif export_issue_texts and allow_partial and exported > 0:
-                export_state = "partial"
-            elif export_issue_texts:
-                export_state = "failed"
             else:
                 export_state = "incomplete"
         else:
@@ -1924,6 +1924,22 @@ def audit_public_source_records(
 ) -> SourceCollectionAudit:
     """Audit local public issue/PR source exports before registry import."""
 
+    _, audit = filter_accepted_public_source_records(
+        records,
+        allowlist_records,
+        source_name=source_name,
+    )
+    return audit
+
+
+def filter_accepted_public_source_records(
+    records: Iterable[dict[str, Any]],
+    allowlist_records: Iterable[dict[str, Any]],
+    *,
+    source_name: str,
+) -> tuple[list[dict[str, Any]], SourceCollectionAudit]:
+    """Return records that pass collection audit together with the audit summary."""
+
     record_list = list(records)
     filtered, allowlist_summary = filter_records_by_allowlist(
         record_list,
@@ -1937,6 +1953,7 @@ def audit_public_source_records(
     source_type_counts: Counter[str] = Counter()
     seen_instances: dict[str, int] = {}
     accepted = 0
+    accepted_records: list[dict[str, Any]] = []
 
     for index, record in enumerate(record_list):
         repository = _repository(record)
@@ -1958,6 +1975,7 @@ def audit_public_source_records(
                 seen_instances[instance_id] = index
         if id(record) in allowed_ids and len(issues) == before:
             accepted += 1
+            accepted_records.append(record)
             repository_counts[repository] += 1
             language_counts[_normalize_label(record.get("language"))] += 1
             source_type_counts[_source_type(record)] += 1
@@ -1970,15 +1988,18 @@ def audit_public_source_records(
             )
         )
     quarantined = len(record_list) - accepted
-    return SourceCollectionAudit(
-        total=len(record_list),
-        accepted=accepted,
-        quarantined=quarantined,
-        repository_counts=dict(sorted(repository_counts.items())),
-        language_counts=dict(sorted(language_counts.items())),
-        source_type_counts=dict(sorted(source_type_counts.items())),
-        allowlist_filter=allowlist_summary.to_dict(),
-        issues=issues,
+    return (
+        accepted_records,
+        SourceCollectionAudit(
+            total=len(record_list),
+            accepted=accepted,
+            quarantined=quarantined,
+            repository_counts=dict(sorted(repository_counts.items())),
+            language_counts=dict(sorted(language_counts.items())),
+            source_type_counts=dict(sorted(source_type_counts.items())),
+            allowlist_filter=allowlist_summary.to_dict(),
+            issues=issues,
+        ),
     )
 
 

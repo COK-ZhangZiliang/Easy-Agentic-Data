@@ -352,6 +352,42 @@ class RegistrySourceTests(unittest.TestCase):
         self.assertIn("hidden_command", scenario.query_seed.verifier_types)
         self.assertIn("task_family:bug_repair", scenario.query_seed.coverage_tags)
 
+    def test_public_pr_docs_label_needs_example_verifier_for_docs_family(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "type": "pull_request",
+                "number": 44,
+                "title": "docs: add guide for readiness probes",
+                "labels": ["docs"],
+                "test_commands": ["python -m pytest tests"],
+            },
+            source_format="public-pr",
+            source_name="curated-public-prs",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "code_review")
+        self.assertIn("hidden_command", scenario.query_seed.verifier_types)
+        self.assertNotIn("task_family:docs_examples", scenario.query_seed.coverage_tags)
+
+    def test_public_pr_docs_label_uses_docs_family_with_example_verifier(self) -> None:
+        scenario = scenario_from_public_issue_pr_record(
+            {
+                **_public_issue_record(),
+                "type": "pull_request",
+                "number": 45,
+                "title": "docs: add guide for readiness probes",
+                "labels": ["docs"],
+                "example_commands": ["python docs/examples/readiness.py"],
+            },
+            source_format="public-pr",
+            source_name="curated-public-prs",
+        )
+
+        self.assertEqual(scenario.query_seed.task_family, "docs_examples")
+        self.assertIn("example_command", scenario.query_seed.verifier_types)
+        self.assertIn("task_family:docs_examples", scenario.query_seed.coverage_tags)
+
     def test_public_issue_pr_import_skips_ci_records_without_ci_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry = ScenarioRegistry(directory)

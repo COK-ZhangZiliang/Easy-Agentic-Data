@@ -91,6 +91,7 @@ from easy_agentic_data.source_collection import (
     build_source_collection_retry_plan,
     build_source_collection_plan,
     export_public_source_records,
+    filter_accepted_public_source_records,
     merge_source_export_summaries,
     run_source_collection_retry_plan,
     split_public_source_records,
@@ -443,6 +444,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     collection_audit_parser.add_argument("--source", required=True)
     collection_audit_parser.add_argument("--allowlist", required=True)
     collection_audit_parser.add_argument("--output", default="")
+    collection_audit_parser.add_argument("--accepted-output", default="")
     collection_audit_parser.add_argument("--source-name", default="curated-public-sources")
     collection_readiness_parser = registry_subparsers.add_parser("collection-readiness")
     collection_readiness_parser.add_argument("--plan", required=True)
@@ -938,11 +940,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if summary.valid else 2
         if args.registry_command == "collection-audit":
-            audit = audit_public_source_records(
-                load_source_records(args.source),
-                load_repository_allowlist(args.allowlist),
-                source_name=args.source_name,
-            )
+            records = load_source_records(args.source)
+            allowlist = load_repository_allowlist(args.allowlist)
+            if args.accepted_output:
+                accepted_records, audit = filter_accepted_public_source_records(
+                    records,
+                    allowlist,
+                    source_name=args.source_name,
+                )
+                accepted_output = Path(args.accepted_output)
+                accepted_output.parent.mkdir(parents=True, exist_ok=True)
+                accepted_output.write_text(
+                    "".join(
+                        json.dumps(record, sort_keys=True) + "\n"
+                        for record in accepted_records
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                audit = audit_public_source_records(
+                    records,
+                    allowlist,
+                    source_name=args.source_name,
+                )
             payload = audit.to_dict()
             if args.output:
                 Path(args.output).parent.mkdir(parents=True, exist_ok=True)
