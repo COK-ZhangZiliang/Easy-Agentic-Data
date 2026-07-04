@@ -593,6 +593,16 @@ Current checkpoint:
   would need 463 non-Python records, 2,114 non-`ci_build` records, and 470 non-`textualize/rich`
   records, so the next corpus construction step must combine targeted backfill with balanced
   sampling rather than only appending records.
+- `registry seed-selection-plan` now creates a deterministic balanced-selection runbook from a
+  candidate registry without mutating or deleting raw seeds. On the current 1,850-record deep
+  candidate registry and 1,000-trainable target, it selects 605 existing public-source seeds,
+  reserves a lower bound of 395 future backfill slots, and records selection hash
+  `3f11dd27ea1907a3a1d24b5d192a93e7765395ced3c04e47e9337c5d816b29e2`. The reserved slots
+  explicitly include 200 non-Python records for the language cap and 200
+  `repository_grounded_synthetic` records for source-method coverage. The selected existing slice
+  reduces `ci_build` from 991 to 168 and top-repository counts to at most 87, but
+  `ready_for_rollout` remains false until the reserved synthetic/cross-language seeds are
+  materialized, audited, reviewed, and decontaminated.
 - `registry collection-shard-status` now reads the deterministic shard runbook plus local
   preflight reports, shard export summaries, and source JSONL, then assigns each shard a next
   action such as `run_preflight`, `run_export`, `resolve_preflight`, `plan_retry`, or
@@ -651,8 +661,8 @@ Immediate next execution plan:
      other required verifier evidence instead of relabeling weak public records.
    - Add non-Python or cross-language trainable sources so the 80% maximum language-share gate can
      pass without weakening the policy.
-   - Reduce `ci_build`, top-repository, and source-method dominance through targeted backfill and
-     balanced sampling rather than deleting provenance.
+   - Use `registry seed-selection-plan` to reduce `ci_build`, top-repository, and source-method
+     dominance through targeted backfill and balanced sampling rather than deleting provenance.
    - Build or refresh the holdout registry before scale-up so benchmark and curated evaluation
      sources remain separate from trainable seeds.
    - Exit gate: seed and scenario decontamination pass for query text, provenance, source
@@ -805,3 +815,4 @@ Record decisions that affect multiple modules as ADRs under `docs/`.
 | 2026-07-04 | Completed authenticated 30-task source collection, clean accepted-output filtering, readiness probes, and issue/PR plus CI import rehearsals. |
 | 2026-07-04 | Deepened authenticated source collection to 1,850 clean records, passed production source-readiness, reran import rehearsals, and recorded measured seed-audit backfill gaps. |
 | 2026-07-04 | Added a seed backfill planning gate that turns failed seed-audit coverage, verifier, language, repository, and family-share gaps into a deterministic runbook before synthetic generation. |
+| 2026-07-04 | Added a seed selection planning gate that keeps raw candidates intact, selects a balanced existing slice, and reserves explicit synthetic and cross-language backfill slots before rollout. |

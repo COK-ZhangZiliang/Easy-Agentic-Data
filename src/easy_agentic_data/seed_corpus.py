@@ -47,11 +47,13 @@ from easy_agentic_data.seed_library import (
     TASK_FAMILY_VERIFIER_TEMPLATES,
     audit_seed_library,
 )
+from easy_agentic_data.seeds import QuerySeed
 from easy_agentic_data.seed_review import build_seed_review_queue
 
 SEED_CORPUS_SCHEMA_VERSION = "easy_agentic_data.seed_corpus.v1"
 REGISTRY_IMPORT_REHEARSAL_SCHEMA_VERSION = "easy_agentic_data.registry_import_rehearsal.v1"
 SEED_BACKFILL_PLAN_SCHEMA_VERSION = "easy_agentic_data.seed_backfill_plan.v1"
+SEED_SELECTION_PLAN_SCHEMA_VERSION = "easy_agentic_data.seed_selection_plan.v1"
 
 
 def build_seed_corpus(
@@ -573,6 +575,89 @@ def build_seed_backfill_plan(
         },
         "recommended_actions": actions,
         "requires_backfill": requires_backfill,
+        "valid": True,
+    }
+
+
+def build_seed_selection_plan(
+    seeds: Iterable[QuerySeed],
+    policy_config: dict[str, Any],
+    *,
+    target_train_eligible: int | None = None,
+) -> dict[str, Any]:
+    """Plan a balanced train slice while preserving room for required backfill."""
+
+    seed_list = [seed for seed in seeds if seed.train_eligible]
+    config = _dict(policy_config)
+    policy = _seed_policy(config.get("seed_policy", config))
+    target = _selection_target(
+        config,
+        policy,
+        explicit_target=target_train_eligible,
+        candidate_count=len(seed_list),
+    )
+    seed_audit = audit_seed_library(seed_list, policy=policy, holdout_seeds=list(seed_list))
+    seed_audit_payload = seed_audit.to_dict()
+    seed_audit_payload["train_verifier_type_counts"] = _train_verifier_type_counts(seed_list)
+    backfill_plan = build_seed_backfill_plan(seed_audit_payload, config)
+    reserved = _reserved_backfill_slots(
+        backfill_plan["gaps"],
+        target=target,
+        seeds=seed_list,
+        policy=policy,
+    )
+    existing_target = max(0, min(len(seed_list), target - reserved["minimum_reserved_slots"]))
+    selected = _select_existing_seed_slice(
+        seed_list,
+        target=existing_target,
+        final_target=target,
+        policy=policy,
+    )
+    selected_audit = audit_seed_library(
+        selected,
+        policy=policy,
+        holdout_seeds=list(selected),
+    )
+    selected_audit_payload = selected_audit.to_dict()
+    selected_audit_payload["train_verifier_type_counts"] = _train_verifier_type_counts(selected)
+    issues = _selection_plan_issues(
+        target=target,
+        existing_target=existing_target,
+        selected_count=len(selected),
+        selected_audit=selected_audit_payload,
+        reserved=reserved,
+    )
+    selected_ids = [seed.seed_id for seed in selected]
+    ready_for_rollout = (
+        len(selected) == target
+        and not reserved["slots"]
+        and bool(selected_audit_payload["valid"])
+    )
+    return {
+        "schema_version": SEED_SELECTION_PLAN_SCHEMA_VERSION,
+        "target_train_eligible": target,
+        "candidate_train_eligible": len(seed_list),
+        "existing_selection_target": existing_target,
+        "selected_existing_count": len(selected),
+        "selected_seed_ids": selected_ids,
+        "selected_seed_ids_sha256": hashlib.sha256(
+            json.dumps(selected_ids, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "reserved_backfill": reserved,
+        "selected_counts": _selection_counts(selected),
+        "selected_shares_against_target": _selection_shares_against_target(
+            selected,
+            target=target,
+        ),
+        "candidate_seed_audit": seed_audit_payload,
+        "selected_seed_audit": selected_audit_payload,
+        "backfill_plan_summary": {
+            "requires_backfill": bool(backfill_plan["requires_backfill"]),
+            "recommended_action_count": len(backfill_plan["recommended_actions"]),
+        },
+        "issues": issues,
+        "requires_backfill": bool(reserved["slots"]),
+        "ready_for_rollout": ready_for_rollout,
         "valid": True,
     }
 
@@ -1151,6 +1236,410 @@ def _append_dominance_actions(
                 ),
             }
         )
+
+
+def _selection_target(
+    config: dict[str, Any],
+    policy: SeedLibraryPolicy,
+    *,
+    explicit_target: int | None,
+    candidate_count: int,
+) -> int:
+    if explicit_target is not None:
+        return max(0, int(explicit_target))
+    configured = _optional_int(config.get("target_train_eligible"))
+    if configured is not None:
+        return max(0, configured)
+    if policy.min_train_eligible > 0:
+        return policy.min_train_eligible
+    return max(0, candidate_count)
+
+
+def _reserved_backfill_slots(
+    gaps: dict[str, Any],
+    *,
+    target: int,
+    seeds: list[QuerySeed],
+    policy: SeedLibraryPolicy,
+) -> dict[str, Any]:
+    slots: list[dict[str, Any]] = []
+    components: list[dict[str, Any]] = []
+    train_gap = _dict(gaps.get("train_eligible"))
+    train_shortfall = max(0, int(train_gap.get("shortfall", 0) or 0))
+    if train_shortfall:
+        _add_reserved_component(
+            components,
+            slots,
+            component="train_eligible_shortfall",
+            amount=train_shortfall,
+            slot={
+                "type": "train_eligible_minimum",
+                "target": "train_eligible",
+                "minimum_count": train_shortfall,
+            },
+        )
+    _add_gap_slots(
+        components,
+        slots,
+        component="task_family_minimums",
+        slot_type="task_family_minimum",
+        gaps=_dict_list(gaps.get("task_family")),
+    )
+    _add_gap_slots(
+        components,
+        slots,
+        component="source_method_minimums",
+        slot_type="source_method_minimum",
+        gaps=_dict_list(gaps.get("source_method")),
+    )
+    _add_gap_slots(
+        components,
+        slots,
+        component="language_minimums",
+        slot_type="language_minimum",
+        gaps=_dict_list(gaps.get("language_count")),
+    )
+    verifier_gaps = _dict_list(gaps.get("verifier_type"))
+    if verifier_gaps:
+        verifier_lower_bound = max(int(gap.get("shortfall", 0) or 0) for gap in verifier_gaps)
+        if verifier_lower_bound > 0:
+            components.append(
+                {
+                    "component": "verifier_type_minimums",
+                    "minimum_reserved_slots": verifier_lower_bound,
+                    "reason": "Verifier evidence gaps may overlap on the same backfill seeds.",
+                }
+            )
+        for gap in verifier_gaps:
+            shortfall = int(gap.get("shortfall", 0) or 0)
+            if shortfall > 0:
+                slots.append(
+                    {
+                        "type": "verifier_type_minimum",
+                        "target": gap.get("target", ""),
+                        "minimum_count": shortfall,
+                    }
+                )
+    diversity_slots = _diversity_reserved_slots(seeds, target=target, policy=policy)
+    if diversity_slots:
+        diversity_lower_bound = max(slot["minimum_count"] for slot in diversity_slots)
+        components.append(
+            {
+                "component": "share_cap_diversity",
+                "minimum_reserved_slots": diversity_lower_bound,
+                "reason": "Dominant labels need future non-target records to satisfy caps.",
+            }
+        )
+        slots.extend(diversity_slots)
+    minimum_reserved = max(
+        (int(component["minimum_reserved_slots"]) for component in components),
+        default=0,
+    )
+    return {
+        "minimum_reserved_slots": min(target, minimum_reserved),
+        "components": components,
+        "slots": sorted(slots, key=lambda item: (str(item["type"]), str(item["target"]))),
+    }
+
+
+def _add_gap_slots(
+    components: list[dict[str, Any]],
+    slots: list[dict[str, Any]],
+    *,
+    component: str,
+    slot_type: str,
+    gaps: list[dict[str, Any]],
+) -> None:
+    amount = sum(max(0, int(gap.get("shortfall", 0) or 0)) for gap in gaps)
+    if amount <= 0:
+        return
+    components.append(
+        {
+            "component": component,
+            "minimum_reserved_slots": amount,
+            "reason": "Each seed contributes to one label in this dimension.",
+        }
+    )
+    for gap in gaps:
+        shortfall = max(0, int(gap.get("shortfall", 0) or 0))
+        if shortfall <= 0:
+            continue
+        slot = {
+            "type": slot_type,
+            "target": gap.get("target", ""),
+            "minimum_count": shortfall,
+        }
+        if "accepted_verifier_types" in gap:
+            slot["accepted_verifier_types"] = gap["accepted_verifier_types"]
+        slots.append(slot)
+
+
+def _add_reserved_component(
+    components: list[dict[str, Any]],
+    slots: list[dict[str, Any]],
+    *,
+    component: str,
+    amount: int,
+    slot: dict[str, Any],
+) -> None:
+    components.append(
+        {
+            "component": component,
+            "minimum_reserved_slots": amount,
+            "reason": "The current candidate pool is below the configured target.",
+        }
+    )
+    slots.append(slot)
+
+
+def _diversity_reserved_slots(
+    seeds: list[QuerySeed],
+    *,
+    target: int,
+    policy: SeedLibraryPolicy,
+) -> list[dict[str, Any]]:
+    if target <= 0:
+        return []
+    dimensions = {
+        "task_family": (policy.max_task_family_share, _seed_task_family),
+        "source_method": (policy.max_source_method_share, _seed_source_method),
+        "repository": (policy.max_repository_share, _seed_repository_value),
+        "language": (policy.max_language_share, _seed_language_value),
+    }
+    slots = []
+    for dimension, (max_share, value_fn) in dimensions.items():
+        if max_share >= 1.0:
+            continue
+        counts = _dimension_counts(seeds, value_fn)
+        for label, count in counts.items():
+            required_non_target = max(0, target - math.floor(target * max_share))
+            available_non_target = len(seeds) - count
+            shortfall = max(0, required_non_target - available_non_target)
+            if shortfall <= 0:
+                continue
+            slots.append(
+                {
+                    "type": "share_cap_diversity",
+                    "dimension": dimension,
+                    "target": f"non_{label}",
+                    "dominant_label": label,
+                    "minimum_count": shortfall,
+                    "max_share": max_share,
+                }
+            )
+    return sorted(slots, key=lambda item: (item["dimension"], item["target"]))
+
+
+def _select_existing_seed_slice(
+    seeds: list[QuerySeed],
+    *,
+    target: int,
+    final_target: int,
+    policy: SeedLibraryPolicy,
+) -> list[QuerySeed]:
+    if target <= 0:
+        return []
+    remaining = sorted(seeds, key=lambda seed: seed.seed_id)
+    selected: list[QuerySeed] = []
+    counts = _empty_selection_counters()
+    while len(selected) < target:
+        eligible = [
+            seed
+            for seed in remaining
+            if _seed_fits_final_caps(seed, counts, final_target=final_target, policy=policy)
+        ]
+        if not eligible:
+            break
+        chosen = min(
+            eligible,
+            key=lambda seed: _selection_priority(
+                seed,
+                counts,
+                final_target=final_target,
+                policy=policy,
+            ),
+        )
+        selected.append(chosen)
+        _update_selection_counters(counts, chosen)
+        remaining.remove(chosen)
+    return selected
+
+
+def _empty_selection_counters() -> dict[str, Counter[str]]:
+    return {
+        "task_family": Counter(),
+        "source_method": Counter(),
+        "repository": Counter(),
+        "language": Counter(),
+    }
+
+
+def _seed_fits_final_caps(
+    seed: QuerySeed,
+    counts: dict[str, Counter[str]],
+    *,
+    final_target: int,
+    policy: SeedLibraryPolicy,
+) -> bool:
+    if final_target <= 0:
+        return False
+    for dimension, max_share, value in _seed_dimension_values(seed, policy):
+        if max_share >= 1.0:
+            continue
+        cap = math.floor(final_target * max_share)
+        if cap <= 0 or counts[dimension][value] + 1 > cap:
+            return False
+    return True
+
+
+def _selection_priority(
+    seed: QuerySeed,
+    counts: dict[str, Counter[str]],
+    *,
+    final_target: int,
+    policy: SeedLibraryPolicy,
+) -> tuple[float, float, float, float, str]:
+    pressure = []
+    for dimension, max_share, value in _seed_dimension_values(seed, policy):
+        if max_share >= 1.0:
+            pressure.append(0.0)
+            continue
+        cap = max(1, math.floor(final_target * max_share))
+        pressure.append(counts[dimension][value] / cap)
+    return (
+        pressure[0],
+        pressure[1],
+        pressure[2],
+        pressure[3],
+        seed.seed_id,
+    )
+
+
+def _seed_dimension_values(
+    seed: QuerySeed,
+    policy: SeedLibraryPolicy,
+) -> tuple[tuple[str, float, str], ...]:
+    return (
+        ("task_family", policy.max_task_family_share, _seed_task_family(seed)),
+        ("source_method", policy.max_source_method_share, _seed_source_method(seed)),
+        ("repository", policy.max_repository_share, _seed_repository_value(seed)),
+        ("language", policy.max_language_share, _seed_language_value(seed)),
+    )
+
+
+def _update_selection_counters(
+    counts: dict[str, Counter[str]],
+    seed: QuerySeed,
+) -> None:
+    counts["task_family"][_seed_task_family(seed)] += 1
+    counts["source_method"][_seed_source_method(seed)] += 1
+    counts["repository"][_seed_repository_value(seed)] += 1
+    counts["language"][_seed_language_value(seed)] += 1
+
+
+def _selection_counts(seeds: list[QuerySeed]) -> dict[str, dict[str, int]]:
+    counts = _empty_selection_counters()
+    verifier_counts: Counter[str] = Counter()
+    for seed in seeds:
+        _update_selection_counters(counts, seed)
+        verifier_counts.update(seed.verifier_types)
+    return {
+        "task_family": dict(sorted(counts["task_family"].items())),
+        "source_method": dict(sorted(counts["source_method"].items())),
+        "repository": dict(sorted(counts["repository"].items())),
+        "language": dict(sorted(counts["language"].items())),
+        "verifier_type": dict(sorted(verifier_counts.items())),
+    }
+
+
+def _selection_shares_against_target(
+    seeds: list[QuerySeed],
+    *,
+    target: int,
+) -> dict[str, dict[str, float]]:
+    counts = _selection_counts(seeds)
+    denominator = max(1, target)
+    return {
+        dimension: {
+            label: round(count / denominator, 6)
+            for label, count in sorted(dimension_counts.items())
+        }
+        for dimension, dimension_counts in counts.items()
+    }
+
+
+def _selection_plan_issues(
+    *,
+    target: int,
+    existing_target: int,
+    selected_count: int,
+    selected_audit: dict[str, Any],
+    reserved: dict[str, Any],
+) -> list[dict[str, Any]]:
+    issues = []
+    if selected_count < existing_target:
+        issues.append(
+            {
+                "code": "existing_selection_shortfall",
+                "message": (
+                    f"Selected {selected_count} existing seeds but planned "
+                    f"{existing_target} before reserved backfill slots"
+                ),
+                "severity": "error",
+            }
+        )
+    if reserved["slots"]:
+        issues.append(
+            {
+                "code": "reserved_backfill_required",
+                "message": (
+                    f"Selection needs at least {reserved['minimum_reserved_slots']} "
+                    f"future backfill slots before reaching target {target}"
+                ),
+                "severity": "warning",
+            }
+        )
+    if not reserved["slots"] and not bool(selected_audit.get("valid", False)):
+        issues.append(
+            {
+                "code": "selected_seed_audit_failed",
+                "message": "The selected seed slice does not satisfy the seed policy.",
+                "severity": "error",
+            }
+        )
+    return issues
+
+
+def _dimension_counts(
+    seeds: Iterable[QuerySeed],
+    value_fn: Any,
+) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for seed in seeds:
+        value = value_fn(seed)
+        if value:
+            counts[value] += 1
+    return counts
+
+
+def _seed_task_family(seed: QuerySeed) -> str:
+    return _normalize_label(seed.task_family)
+
+
+def _seed_source_method(seed: QuerySeed) -> str:
+    return _normalize_label(seed.source_method)
+
+
+def _seed_repository_value(seed: QuerySeed) -> str:
+    value = seed.public.context.get("repository") or seed.metadata.get("repository", "")
+    return _normalize_label(value).replace("__", "/")
+
+
+def _seed_language_value(seed: QuerySeed) -> str:
+    for tag in seed.coverage_tags:
+        if tag.startswith("language:"):
+            return _normalize_label(tag.split(":", 1)[1])
+    return _normalize_label(seed.metadata.get("language", ""))
 
 
 def _quarantine_summary(

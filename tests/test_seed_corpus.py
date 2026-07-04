@@ -14,9 +14,11 @@ from easy_agentic_data.repository_synthetic import DEFAULT_REPOSITORY_SYNTHETIC_
 from easy_agentic_data.seed_corpus import (
     build_seed_backfill_plan,
     build_seed_corpus,
+    build_seed_selection_plan,
     rehearse_registry_import,
 )
 from easy_agentic_data.seed_library import SUPPORTED_TASK_FAMILIES, SeedLibraryPolicy
+from easy_agentic_data.seeds import PublicTaskContext, QuerySeed
 
 PINNED_IMAGE = "python@sha256:" + ("c" * 64)
 
@@ -122,6 +124,80 @@ class SeedCorpusTests(unittest.TestCase):
             disk_payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(exit_code, 0)
             self.assertEqual(payload, disk_payload)
+            self.assertTrue(payload["requires_backfill"])
+
+    def test_seed_selection_plan_reserves_backfill_slots(self) -> None:
+        seeds = [
+            _selection_seed("bug-1", "bug_repair", "public_ci_workspace", "repo/a"),
+            _selection_seed("bug-2", "bug_repair", "public_ci_workspace", "repo/a"),
+            _selection_seed("bug-3", "bug_repair", "public_ci_workspace", "repo/a"),
+            _selection_seed("ci-1", "ci_build", "public_ci_workspace", "repo/b"),
+            _selection_seed("ci-2", "ci_build", "public_issue_workspace", "repo/c"),
+            _selection_seed("review-1", "code_review", "public_pr_workspace", "repo/d"),
+        ]
+
+        plan = build_seed_selection_plan(
+            seeds,
+            _selection_policy(),
+            target_train_eligible=6,
+        )
+        slot_keys = {(slot["type"], slot["target"]) for slot in plan["reserved_backfill"]["slots"]}
+
+        self.assertTrue(plan["valid"])
+        self.assertFalse(plan["ready_for_rollout"])
+        self.assertTrue(plan["requires_backfill"])
+        self.assertEqual(plan["target_train_eligible"], 6)
+        self.assertEqual(plan["reserved_backfill"]["minimum_reserved_slots"], 2)
+        self.assertEqual(plan["existing_selection_target"], 4)
+        self.assertEqual(plan["selected_existing_count"], 4)
+        self.assertLessEqual(plan["selected_counts"]["task_family"]["bug_repair"], 3)
+        self.assertLessEqual(plan["selected_counts"]["repository"]["repo/a"], 3)
+        self.assertLessEqual(
+            plan["selected_shares_against_target"]["task_family"]["bug_repair"],
+            0.5,
+        )
+        self.assertIn(("task_family_minimum", "docs_examples"), slot_keys)
+        self.assertIn(("source_method_minimum", "repository_grounded_synthetic"), slot_keys)
+        self.assertIn(("share_cap_diversity", "non_python"), slot_keys)
+        self.assertEqual(len(plan["selected_seed_ids_sha256"]), 64)
+
+    def test_cli_seed_selection_plan_writes_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_root = root / "registry"
+            policy_path = root / "policy.json"
+            output_path = root / "selection-plan.json"
+            registry = ScenarioRegistry(registry_root)
+            registry.initialize()
+            for seed in [
+                _selection_seed("bug-1", "bug_repair", "public_ci_workspace", "repo/a"),
+                _selection_seed("ci-1", "ci_build", "public_issue_workspace", "repo/b"),
+            ]:
+                registry.add_seed(seed)
+            policy_path.write_text(json.dumps(_selection_policy()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "registry",
+                        "seed-selection-plan",
+                        "--root",
+                        str(registry_root),
+                        "--policy",
+                        str(policy_path),
+                        "--target-train-eligible",
+                        "4",
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            disk_payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload, disk_payload)
+            self.assertEqual(payload["candidate_train_eligible"], 2)
             self.assertTrue(payload["requires_backfill"])
 
     def test_cli_build_seed_corpus_fails_when_budget_is_unmet(self) -> None:
@@ -648,6 +724,48 @@ def _backfill_policy() -> dict[str, object]:
             "min_verifier_type_counts": {
                 "doctest": 5,
             },
+        },
+    }
+
+
+def _selection_seed(
+    suffix: str,
+    task_family: str,
+    source_method: str,
+    repository: str,
+    *,
+    language: str = "python",
+) -> QuerySeed:
+    return QuerySeed(
+        PublicTaskContext(
+            f"Handle {suffix}.",
+            context={"repository": repository},
+        ),
+        license="MIT",
+        task_family=task_family,
+        source_method=source_method,
+        verifier_types=["hidden_command"],
+        coverage_tags=[f"language:{language}"],
+        metadata={"repository": repository, "language": language},
+    )
+
+
+def _selection_policy() -> dict[str, object]:
+    return {
+        "target_train_eligible": 6,
+        "seed_policy": {
+            "min_train_eligible": 6,
+            "required_task_families": ["bug_repair", "ci_build", "docs_examples"],
+            "required_verifier_types": ["hidden_command", "doctest"],
+            "max_task_family_share": 0.50,
+            "max_source_method_share": 0.75,
+            "max_repository_share": 0.50,
+            "max_language_share": 0.80,
+        },
+        "coverage_budgets": {
+            "min_task_family_counts": {"docs_examples": 2},
+            "min_source_method_counts": {"repository_grounded_synthetic": 2},
+            "min_verifier_type_counts": {"doctest": 2},
         },
     }
 

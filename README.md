@@ -11,7 +11,7 @@ and sandboxed tools turn their interaction into training data.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-203%20total-22C55E)](tests/)
+[![Tests](https://img.shields.io/badge/tests-205%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) ·
@@ -219,6 +219,20 @@ The backfill plan separates minimum-count gaps, missing verifier evidence, sourc
 language coverage, and dominance caps. It also reports how many non-dominant records would be
 needed if the corpus kept every current seed, which makes it explicit when balanced sampling is a
 better next step than simply adding more data.
+
+After planning the missing records, create a deterministic seed-selection plan for the current
+candidate registry. The plan keeps the raw registry intact, selects the existing trainable seeds
+that fit final share caps, and reserves slots for future synthetic or cross-language backfill:
+
+```bash
+PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-selection-plan \
+  --root runs/train-registry \
+  --policy examples/production-seed-corpus-policy.json \
+  --output runs/train-registry/seed-selection-plan.json
+```
+
+The selection plan is a runbook, not an approval. `ready_for_rollout` remains false while reserved
+backfill slots, missing verifier evidence, or decontamination gates are unresolved.
 
 Scenario-level audits compare trainable scenarios against held-out evaluator oracles without
 exposing oracle text to the agent. They fail when trainable scenarios reuse held-out hidden test

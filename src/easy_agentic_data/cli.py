@@ -86,6 +86,7 @@ from easy_agentic_data.seed_library import (
 from easy_agentic_data.seed_corpus import (
     build_seed_backfill_plan,
     build_seed_corpus,
+    build_seed_selection_plan,
     rehearse_registry_import,
 )
 from easy_agentic_data.seed_review import build_seed_review_queue
@@ -294,6 +295,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     seed_backfill_parser.add_argument("--audit", required=True)
     seed_backfill_parser.add_argument("--policy", required=True)
     seed_backfill_parser.add_argument("--output", default="")
+    seed_selection_parser = registry_subparsers.add_parser("seed-selection-plan")
+    seed_selection_parser.add_argument("--root", required=True)
+    seed_selection_parser.add_argument("--policy", required=True)
+    seed_selection_parser.add_argument("--target-train-eligible", type=int)
+    seed_selection_parser.add_argument("--output", default="")
     import_rehearsal_parser = registry_subparsers.add_parser("import-rehearsal")
     import_rehearsal_parser.add_argument("--root", required=True)
     import_rehearsal_parser.add_argument("--source", required=True)
@@ -1051,6 +1057,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = build_seed_backfill_plan(
                 json.loads(Path(args.audit).read_text(encoding="utf-8")),
                 json.loads(Path(args.policy).read_text(encoding="utf-8")),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-selection-plan":
+            payload = build_seed_selection_plan(
+                ScenarioRegistry(args.root).list_seeds(),
+                json.loads(Path(args.policy).read_text(encoding="utf-8")),
+                target_train_eligible=args.target_train_eligible,
             )
             if args.output:
                 Path(args.output).parent.mkdir(parents=True, exist_ok=True)
