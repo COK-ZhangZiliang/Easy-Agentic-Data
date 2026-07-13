@@ -1,6 +1,4 @@
 {
-  "run_name": "deepseek-v4-flash-demo",
-  "random_seed": 42,
   "llm": {
     "provider": "openai_compatible",
     "model": "deepseek-v4-flash",
@@ -17,21 +15,5 @@
         "type": "disabled"
       }
     }
-  },
-  "generation": {
-    "num_tasks": 3,
-    "rollouts_per_task": 2,
-    "max_turns": 6,
-    "min_reward": 0.7,
-    "seed_topics": [
-      "calculation",
-      "tool use"
-    ],
-    "evolve_rounds": 1
-  },
-  "output": {
-    "directory": "runs/deepseek-v4-flash-demo",
-    "export_sft": true,
-    "export_preferences": true
   }
 }

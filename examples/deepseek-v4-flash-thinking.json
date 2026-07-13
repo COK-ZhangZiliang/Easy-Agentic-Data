@@ -1,6 +1,4 @@
 {
-  "run_name": "deepseek-v4-flash-thinking-demo",
-  "random_seed": 42,
   "llm": {
     "provider": "openai_compatible",
     "model": "deepseek-v4-flash",
@@ -18,20 +16,5 @@
       },
       "reasoning_effort": "high"
     }
-  },
-  "generation": {
-    "num_tasks": 1,
-    "rollouts_per_task": 1,
-    "max_turns": 10,
-    "min_reward": 0.7,
-    "seed_topics": [
-      "software engineering"
-    ],
-    "evolve_rounds": 0
-  },
-  "output": {
-    "directory": "runs/deepseek-v4-flash-thinking-demo",
-    "export_sft": true,
-    "export_preferences": true
   }
 }

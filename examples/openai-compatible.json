@@ -1,6 +1,4 @@
 {
-  "run_name": "api-demo",
-  "random_seed": 42,
   "llm": {
     "provider": "openai_compatible",
     "model": "YOUR_MODEL_NAME",
@@ -13,22 +11,5 @@
     "max_retries": 2,
     "retry_backoff_seconds": 1.0,
     "request_body": {}
-  },
-  "generation": {
-    "num_tasks": 20,
-    "rollouts_per_task": 4,
-    "max_turns": 8,
-    "min_reward": 0.7,
-    "seed_topics": [
-      "calculation",
-      "information lookup",
-      "planning"
-    ],
-    "evolve_rounds": 1
-  },
-  "output": {
-    "directory": "runs/api-demo",
-    "export_sft": true,
-    "export_preferences": true
   }
 }

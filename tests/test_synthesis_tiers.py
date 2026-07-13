@@ -14,15 +14,15 @@ from easy_agentic_data.traces import load_trace
 
 
 class SynthesisTierTests(unittest.TestCase):
-    def test_default_tiers_describe_smoke_complex_and_registry_paths(self) -> None:
+    def test_default_tiers_describe_local_and_registry_paths(self) -> None:
         tiers = default_synthesis_tiers()
 
         self.assertEqual(
             [tier.tier_id for tier in tiers],
-            ["smoke", "complex_synthetic", "registry_backed"],
+            ["complex_synthetic", "registry_backed"],
         )
-        self.assertIn("HeadlessAgent", tiers[1].runtime)
-        self.assertIn("Docker", tiers[2].runtime)
+        self.assertIn("HeadlessAgent", tiers[0].runtime)
+        self.assertIn("Docker", tiers[1].runtime)
 
     def test_complex_synthetic_demo_writes_replayable_training_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -58,7 +58,7 @@ class SynthesisTierTests(unittest.TestCase):
                 self.assertEqual(main(["synthesis", "complex-demo", "--output", directory]), 0)
             summary = json.loads(run_stdout.getvalue())
 
-        self.assertEqual(payload[0]["tier_id"], "smoke")
+        self.assertEqual(payload[0]["tier_id"], "complex_synthetic")
         self.assertEqual(summary["tier"], "complex_synthetic")
         self.assertTrue(summary["success"])
 

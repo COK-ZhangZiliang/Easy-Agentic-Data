@@ -25,7 +25,7 @@ from easy_agentic_data.batch import (
     selected_job_status,
 )
 from easy_agentic_data.coding_tools import SCHEMAS, CodingToolRuntime
-from easy_agentic_data.config import PipelineConfig, load_config
+from easy_agentic_data.config import LLMConfig, load_llm_config
 from easy_agentic_data.evaluation import (
     EvaluationSuite,
     ForbiddenStateEvaluator,
@@ -38,13 +38,11 @@ from easy_agentic_data.evaluation import (
     evaluation_result_metrics,
     finalize_evaluation_trace,
 )
-from easy_agentic_data.llm.mock import MockLLMClient
 from easy_agentic_data.llm.observability import ObservedLLMClient
 from easy_agentic_data.llm.openai_compatible import (
     LocalOpenAICompatibleClient,
     OpenAICompatibleClient,
 )
-from easy_agentic_data.pipeline import SynthesisPipeline
 from easy_agentic_data.policy import ToolPolicy
 from easy_agentic_data.real_seed_sources import (
     DEFAULT_DEMO_IMAGE_DIGEST,
@@ -78,66 +76,61 @@ from easy_agentic_data.scenario_decontamination import (
     audit_scenario_decontamination,
     scenarios_from_registry,
 )
+from easy_agentic_data.seed_corpus import (
+    apply_hidden_command_curation_records,
+    apply_hidden_test_patch_curation_records,
+    apply_synthetic_evidence_records,
+    assemble_seed_candidate_registry,
+    build_hidden_command_curation_plan,
+    build_hidden_command_curation_record_template,
+    build_hidden_test_patch_curation_plan,
+    build_hidden_test_patch_curation_record_template,
+    build_seed_backfill_plan,
+    build_seed_corpus,
+    build_seed_remediation_plan,
+    build_seed_selection_plan,
+    build_source_workspace_materialization_plan,
+    build_synthetic_backfill_spec_plan,
+    build_synthetic_evidence_backfill_plan,
+    build_synthetic_evidence_record_templates,
+    build_synthetic_evidence_shard_schedule,
+    combine_synthetic_generator_ready_specs,
+    materialize_source_workspaces,
+    rehearse_registry_import,
+    summarize_synthetic_evidence_shard_status,
+)
 from easy_agentic_data.seed_library import (
     DEFAULT_BENCHMARK_SOURCE_ALIASES,
     SeedLibraryPolicy,
     audit_seed_library,
 )
-from easy_agentic_data.seed_corpus import (
-    build_seed_backfill_plan,
-    build_seed_corpus,
-    build_seed_selection_plan,
-    build_synthetic_backfill_spec_plan,
-    rehearse_registry_import,
-)
 from easy_agentic_data.seed_review import build_seed_review_queue
+from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
-    build_source_collection_shard_schedule,
-    build_source_collection_retry_plan,
     build_source_collection_plan,
+    build_source_collection_retry_plan,
+    build_source_collection_shard_schedule,
     export_public_source_records,
     filter_accepted_public_source_records,
     merge_source_export_summaries,
     run_source_collection_retry_plan,
     split_public_source_records,
     summarize_source_collection_preflight,
-    summarize_source_collection_shard_status,
     summarize_source_collection_readiness,
+    summarize_source_collection_shard_status,
 )
-from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
-from easy_agentic_data.tools import default_tool_registry
 from easy_agentic_data.traces import TraceRecorder, load_trace, replay_trace
-from easy_agentic_data.verification import (
-    SemanticLLMVerifier,
-    StructuralVerifier,
-    ToolExecutionVerifier,
-    VerificationSuite,
-)
 
 
-def build_pipeline(config: PipelineConfig) -> SynthesisPipeline:
-    client = ObservedLLMClient(build_llm_client(config))
-    verification = VerificationSuite(
-        [
-            StructuralVerifier(),
-            ToolExecutionVerifier(),
-            SemanticLLMVerifier(client),
-        ]
-    )
-    return SynthesisPipeline(config, client, default_tool_registry(), verification)
-
-
-def build_llm_client(config: PipelineConfig):
-    if config.llm.provider == "mock":
-        return MockLLMClient()
-    elif config.llm.provider == "openai_compatible":
-        return OpenAICompatibleClient(config.llm)
-    elif config.llm.provider == "local_openai_compatible":
-        return LocalOpenAICompatibleClient(config.llm)
+def build_llm_client(config: LLMConfig):
+    if config.provider == "openai_compatible":
+        return OpenAICompatibleClient(config)
+    elif config.provider == "local_openai_compatible":
+        return LocalOpenAICompatibleClient(config)
     else:
-        raise ValueError(f"Unsupported LLM provider: {config.llm.provider}")
+        raise ValueError(f"Unsupported LLM provider: {config.provider}")
 
 
 def _parse_train_eligible(value: str) -> bool | None:
@@ -146,11 +139,19 @@ def _parse_train_eligible(value: str) -> bool | None:
     return value == "true"
 
 
+def _evidence_record_list(value: object) -> list[dict[str, object]]:
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return list(value)
+    if isinstance(value, dict):
+        records = value.get("evidence_records", value.get("records"))
+        if isinstance(records, list) and all(isinstance(item, dict) for item in records):
+            return list(records)
+    raise ValueError("Evidence records must be a JSON array or an object with records")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ead")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    run_parser = subparsers.add_parser("run", help="Run a synthesis pipeline")
-    run_parser.add_argument("--config", required=True, help="Path to a JSON configuration file")
     synthesis_parser = subparsers.add_parser("synthesis", help="Run or inspect synthesis tiers")
     synthesis_subparsers = synthesis_parser.add_subparsers(dest="synthesis_command", required=True)
     synthesis_subparsers.add_parser("tiers", help="List the supported synthesis tiers")
@@ -301,6 +302,85 @@ def main(argv: Sequence[str] | None = None) -> int:
     seed_selection_parser.add_argument("--policy", required=True)
     seed_selection_parser.add_argument("--target-train-eligible", type=int)
     seed_selection_parser.add_argument("--output", default="")
+    seed_remediation_parser = registry_subparsers.add_parser("seed-remediation-plan")
+    seed_remediation_parser.add_argument("--selection-plan", required=True)
+    seed_remediation_parser.add_argument("--policy", required=True)
+    seed_remediation_parser.add_argument("--allowlist", default="")
+    seed_remediation_parser.add_argument("--output", default="")
+    hidden_patch_curation_parser = registry_subparsers.add_parser(
+        "hidden-test-patch-curation-plan"
+    )
+    hidden_patch_curation_parser.add_argument("--source-records", required=True)
+    hidden_patch_curation_parser.add_argument("--remediation-plan", required=True)
+    hidden_patch_curation_parser.add_argument("--max-records", type=int)
+    hidden_patch_curation_parser.add_argument("--output", default="")
+    hidden_patch_template_parser = registry_subparsers.add_parser(
+        "hidden-test-patch-curation-record-template"
+    )
+    hidden_patch_template_parser.add_argument("--curation-plan", required=True)
+    hidden_patch_template_parser.add_argument("--records-output", default="")
+    hidden_patch_template_parser.add_argument("--output", default="")
+    hidden_patch_apply_parser = registry_subparsers.add_parser(
+        "hidden-test-patch-curation-apply"
+    )
+    hidden_patch_apply_parser.add_argument("--curation-plan", required=True)
+    hidden_patch_apply_parser.add_argument("--source-records", required=True)
+    hidden_patch_apply_parser.add_argument("--curation-records", required=True)
+    hidden_patch_apply_parser.add_argument("--output-records", default="")
+    hidden_patch_apply_parser.add_argument("--output", default="")
+    hidden_command_curation_parser = registry_subparsers.add_parser(
+        "hidden-command-curation-plan"
+    )
+    hidden_command_curation_parser.add_argument("--source-records", required=True)
+    hidden_command_curation_parser.add_argument(
+        "--rehearsal-summary",
+        action="append",
+        default=[],
+        help="Import-rehearsal summary JSON; repeat to attach observed command failures",
+    )
+    hidden_command_curation_parser.add_argument("--max-records", type=int)
+    hidden_command_curation_parser.add_argument("--output", default="")
+    hidden_command_template_parser = registry_subparsers.add_parser(
+        "hidden-command-curation-record-template"
+    )
+    hidden_command_template_parser.add_argument("--curation-plan", required=True)
+    hidden_command_template_parser.add_argument("--records-output", default="")
+    hidden_command_template_parser.add_argument("--output", default="")
+    hidden_command_apply_parser = registry_subparsers.add_parser(
+        "hidden-command-curation-apply"
+    )
+    hidden_command_apply_parser.add_argument("--curation-plan", required=True)
+    hidden_command_apply_parser.add_argument("--source-records", required=True)
+    hidden_command_apply_parser.add_argument("--curation-records", required=True)
+    hidden_command_apply_parser.add_argument("--output-records", default="")
+    hidden_command_apply_parser.add_argument("--output", default="")
+    source_workspace_parser = registry_subparsers.add_parser(
+        "source-workspace-materialization-plan"
+    )
+    source_workspace_parser.add_argument("--source-records", required=True)
+    source_workspace_parser.add_argument("--workspace-root", required=True)
+    source_workspace_parser.add_argument("--max-records", type=int)
+    source_workspace_parser.add_argument("--shard-size", type=int, default=20)
+    source_workspace_parser.add_argument("--output", default="")
+    materialize_source_workspaces_parser = registry_subparsers.add_parser(
+        "materialize-source-workspaces"
+    )
+    materialize_source_workspaces_parser.add_argument("--plan", required=True)
+    materialize_source_workspaces_parser.add_argument("--source-records", required=True)
+    materialize_source_workspaces_parser.add_argument("--shard-id", default="")
+    materialize_source_workspaces_parser.add_argument("--task-offset", type=int, default=0)
+    materialize_source_workspaces_parser.add_argument("--max-tasks", type=int)
+    materialize_source_workspaces_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=300.0,
+    )
+    materialize_source_workspaces_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+    )
+    materialize_source_workspaces_parser.add_argument("--output-records", default="")
+    materialize_source_workspaces_parser.add_argument("--output", default="")
     synthetic_backfill_parser = registry_subparsers.add_parser("seed-synthetic-backfill-spec")
     synthetic_backfill_parser.add_argument("--root", required=True)
     synthetic_backfill_parser.add_argument("--selection-plan", required=True)
@@ -308,6 +388,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     synthetic_backfill_parser.add_argument("--max-repositories", type=int, default=10)
     synthetic_backfill_parser.add_argument("--output", default="")
     synthetic_backfill_parser.add_argument("--spec-output", default="")
+    synthetic_evidence_parser = registry_subparsers.add_parser(
+        "seed-synthetic-evidence-plan"
+    )
+    synthetic_evidence_parser.add_argument("--synthetic-backfill-plan", required=True)
+    synthetic_evidence_parser.add_argument("--backfill-plan", default="")
+    synthetic_evidence_parser.add_argument("--output", default="")
+    synthetic_evidence_shards_parser = registry_subparsers.add_parser(
+        "seed-synthetic-evidence-shards"
+    )
+    synthetic_evidence_shards_parser.add_argument("--evidence-plan", required=True)
+    synthetic_evidence_shards_parser.add_argument("--synthetic-backfill-plan", required=True)
+    synthetic_evidence_shards_parser.add_argument("--output-dir", required=True)
+    synthetic_evidence_shards_parser.add_argument("--shard-size", type=int, default=20)
+    synthetic_evidence_shards_parser.add_argument("--output", default="")
+    synthetic_evidence_templates_parser = registry_subparsers.add_parser(
+        "seed-synthetic-evidence-record-templates"
+    )
+    synthetic_evidence_templates_parser.add_argument("--evidence-plan", required=True)
+    synthetic_evidence_templates_parser.add_argument("--schedule", required=True)
+    synthetic_evidence_templates_parser.add_argument("--output", default="")
+    synthetic_evidence_status_parser = registry_subparsers.add_parser(
+        "seed-synthetic-evidence-shard-status"
+    )
+    synthetic_evidence_status_parser.add_argument("--schedule", required=True)
+    synthetic_evidence_status_parser.add_argument("--output", default="")
+    synthetic_evidence_apply_parser = registry_subparsers.add_parser(
+        "seed-synthetic-evidence-apply"
+    )
+    synthetic_evidence_apply_parser.add_argument("--synthetic-backfill-plan", required=True)
+    synthetic_evidence_apply_parser.add_argument("--evidence-records", required=True)
+    synthetic_evidence_apply_parser.add_argument("--output", default="")
+    synthetic_evidence_apply_parser.add_argument("--spec-output", default="")
+    synthetic_ready_spec_combine_parser = registry_subparsers.add_parser(
+        "seed-synthetic-ready-spec-combine"
+    )
+    synthetic_ready_spec_combine_parser.add_argument(
+        "--spec",
+        action="append",
+        required=True,
+        help="Generator-ready synthetic spec JSON file; repeat to combine multiple files",
+    )
+    synthetic_ready_spec_combine_parser.add_argument("--output", default="")
+    synthetic_ready_spec_combine_parser.add_argument("--spec-output", default="")
+    assemble_candidate_parser = registry_subparsers.add_parser("assemble-candidate")
+    assemble_candidate_parser.add_argument("--source-root", required=True)
+    assemble_candidate_parser.add_argument("--selection-plan", required=True)
+    assemble_candidate_parser.add_argument("--synthetic-spec", required=True)
+    assemble_candidate_parser.add_argument("--output-root", required=True)
+    assemble_candidate_parser.add_argument(
+        "--source-name",
+        default="repository_synthetic_backfill",
+        help="Source name to attach to generated repository-grounded synthetic records",
+    )
+    assemble_candidate_parser.add_argument("--policy", default="")
+    assemble_candidate_parser.add_argument("--output", default="")
+    assemble_candidate_parser.add_argument("--overwrite-output", action="store_true")
     import_rehearsal_parser = registry_subparsers.add_parser("import-rehearsal")
     import_rehearsal_parser.add_argument("--root", required=True)
     import_rehearsal_parser.add_argument("--source", required=True)
@@ -361,6 +497,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     import_rehearsal_parser.add_argument("--materialize-sample-count", type=int, default=0)
     import_rehearsal_parser.add_argument("--materialize-root", default="")
     import_rehearsal_parser.add_argument("--run-hidden-commands", action="store_true")
+    import_rehearsal_parser.add_argument("--hidden-test-patch-sample-count", type=int, default=0)
+    import_rehearsal_parser.add_argument("--hidden-test-patch-root", default="")
+    import_rehearsal_parser.add_argument(
+        "--hidden-test-patch-expected-outcome",
+        default="fail",
+        choices=["fail", "pass", "any"],
+    )
     import_rehearsal_parser.add_argument("--output", default="")
     allowlist_audit_parser = registry_subparsers.add_parser("allowlist-audit")
     allowlist_audit_parser.add_argument("--source", required=True)
@@ -700,10 +843,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch_readiness.add_argument("--output", default="")
     args = parser.parse_args(argv)
 
-    if args.command == "run":
-        summary = build_pipeline(load_config(args.config)).run()
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-        return 0
     if args.command == "synthesis":
         if args.synthesis_command == "tiers":
             print(
@@ -750,7 +889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 outcome = _run_registry_scenario(
                     ScenarioRegistry(registry_root),
                     scenario_ids[0],
-                    load_config(args.config),
+                    load_llm_config(args.config),
                     trace_path,
                     args.random_seed,
                     _agent_budgets(args),
@@ -1052,6 +1191,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 materialize_sample_count=args.materialize_sample_count,
                 materialize_root=args.materialize_root or None,
                 run_hidden_commands=args.run_hidden_commands,
+                hidden_test_patch_sample_count=args.hidden_test_patch_sample_count,
+                hidden_test_patch_root=args.hidden_test_patch_root or None,
+                hidden_test_patch_expected_outcome=args.hidden_test_patch_expected_outcome,
             )
             if args.output:
                 Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -1085,6 +1227,201 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Path(args.output).write_text(
                     json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
+            )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-remediation-plan":
+            payload = build_seed_remediation_plan(
+                json.loads(Path(args.selection_plan).read_text(encoding="utf-8")),
+                json.loads(Path(args.policy).read_text(encoding="utf-8")),
+                allowlist_records=(
+                    load_repository_allowlist(args.allowlist) if args.allowlist else []
+                ),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "hidden-test-patch-curation-plan":
+            payload = build_hidden_test_patch_curation_plan(
+                load_source_records(args.source_records),
+                json.loads(Path(args.remediation_plan).read_text(encoding="utf-8")),
+                max_records=args.max_records,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["ready_for_curation"] else 2
+        if args.registry_command == "hidden-test-patch-curation-record-template":
+            payload = build_hidden_test_patch_curation_record_template(
+                json.loads(Path(args.curation_plan).read_text(encoding="utf-8")),
+            )
+            if args.records_output and payload["valid"]:
+                Path(args.records_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.records_output).write_text(
+                    json.dumps(
+                        {
+                            "schema_version": payload["schema_version"],
+                            "records": payload["records"],
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "hidden-test-patch-curation-apply":
+            payload, rewritten_records = apply_hidden_test_patch_curation_records(
+                json.loads(Path(args.curation_plan).read_text(encoding="utf-8")),
+                load_source_records(args.source_records),
+                load_source_records(args.curation_records),
+            )
+            if args.output_records and payload["ready_for_import_rehearsal"]:
+                output_records_path = Path(args.output_records)
+                output_records_path.parent.mkdir(parents=True, exist_ok=True)
+                output_records_path.write_text(
+                    "".join(
+                        json.dumps(record, sort_keys=True) + "\n"
+                        for record in rewritten_records
+                    ),
+                    encoding="utf-8",
+                )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["ready_for_import_rehearsal"] else 2
+        if args.registry_command == "hidden-command-curation-plan":
+            payload = build_hidden_command_curation_plan(
+                load_source_records(args.source_records),
+                rehearsal_summaries=[
+                    json.loads(Path(path).read_text(encoding="utf-8"))
+                    for path in args.rehearsal_summary
+                ],
+                max_records=args.max_records,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+            )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["ready_for_curation"] else 2
+        if args.registry_command == "hidden-command-curation-record-template":
+            payload = build_hidden_command_curation_record_template(
+                json.loads(Path(args.curation_plan).read_text(encoding="utf-8")),
+            )
+            if args.records_output and payload["valid"]:
+                Path(args.records_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.records_output).write_text(
+                    json.dumps(
+                        {
+                            "schema_version": payload["schema_version"],
+                            "records": payload["records"],
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "hidden-command-curation-apply":
+            payload, rewritten_records = apply_hidden_command_curation_records(
+                json.loads(Path(args.curation_plan).read_text(encoding="utf-8")),
+                load_source_records(args.source_records),
+                load_source_records(args.curation_records),
+            )
+            if args.output_records and payload["ready_for_import_rehearsal"]:
+                output_records_path = Path(args.output_records)
+                output_records_path.parent.mkdir(parents=True, exist_ok=True)
+                output_records_path.write_text(
+                    "".join(
+                        json.dumps(record, sort_keys=True) + "\n"
+                        for record in rewritten_records
+                    ),
+                    encoding="utf-8",
+                )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["ready_for_import_rehearsal"] else 2
+        if args.registry_command == "source-workspace-materialization-plan":
+            payload = build_source_workspace_materialization_plan(
+                load_source_records(args.source_records),
+                workspace_root=args.workspace_root,
+                max_records=args.max_records,
+                shard_size=args.shard_size,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["ready_for_materialization"] else 2
+        if args.registry_command == "materialize-source-workspaces":
+            payload, rewritten_records = materialize_source_workspaces(
+                json.loads(Path(args.plan).read_text(encoding="utf-8")),
+                load_source_records(args.source_records),
+                shard_id=args.shard_id,
+                task_offset=args.task_offset,
+                max_tasks=args.max_tasks,
+                timeout_seconds=args.timeout_seconds,
+                dry_run=args.dry_run,
+            )
+            payload["outputs"] = {
+                "records_output": args.output_records,
+                "records_output_written": False,
+            }
+            if args.output_records and payload["ready_for_import_rehearsal"]:
+                output_records_path = Path(args.output_records)
+                output_records_path.parent.mkdir(parents=True, exist_ok=True)
+                output_records_path.write_text(
+                    "".join(
+                        json.dumps(record, sort_keys=True) + "\n"
+                        for record in rewritten_records
+                    ),
+                    encoding="utf-8",
+                )
+                payload["outputs"]["records_output_written"] = True
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if payload["valid"] else 2
@@ -1104,8 +1441,162 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.spec_output:
                 Path(args.spec_output).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.spec_output).write_text(
-                    json.dumps(payload["generator_ready_specs"], indent=2, sort_keys=True)
+                    (
+                        json.dumps(
+                            payload["generator_ready_specs"],
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    ),
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-evidence-plan":
+            payload = build_synthetic_evidence_backfill_plan(
+                json.loads(
+                    Path(args.synthetic_backfill_plan).read_text(encoding="utf-8")
+                ),
+                (
+                    json.loads(Path(args.backfill_plan).read_text(encoding="utf-8"))
+                    if args.backfill_plan
+                    else None
+                ),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-evidence-shards":
+            payload = build_synthetic_evidence_shard_schedule(
+                json.loads(Path(args.evidence_plan).read_text(encoding="utf-8")),
+                synthetic_backfill_plan_path=args.synthetic_backfill_plan,
+                output_dir=args.output_dir,
+                shard_size=args.shard_size,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-evidence-record-templates":
+            payload = build_synthetic_evidence_record_templates(
+                json.loads(Path(args.evidence_plan).read_text(encoding="utf-8")),
+                json.loads(Path(args.schedule).read_text(encoding="utf-8")),
+            )
+            if payload["valid"]:
+                for template in payload["shard_templates"]:
+                    template_path = Path(template["record_template_output"])
+                    template_path.parent.mkdir(parents=True, exist_ok=True)
+                    template_path.write_text(
+                        json.dumps(
+                            template["template_payload"],
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-evidence-shard-status":
+            payload = summarize_synthetic_evidence_shard_status(
+                json.loads(Path(args.schedule).read_text(encoding="utf-8")),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-evidence-apply":
+            payload = apply_synthetic_evidence_records(
+                json.loads(
+                    Path(args.synthetic_backfill_plan).read_text(encoding="utf-8")
+                ),
+                _evidence_record_list(
+                    json.loads(Path(args.evidence_records).read_text(encoding="utf-8"))
+                ),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            if args.spec_output:
+                Path(args.spec_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.spec_output).write_text(
+                    json.dumps(
+                        payload["generator_ready_specs"],
+                        indent=2,
+                        sort_keys=True,
+                    )
                     + "\n",
+                    encoding="utf-8",
+            )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "seed-synthetic-ready-spec-combine":
+            payload = combine_synthetic_generator_ready_specs(
+                json.loads(Path(spec_path).read_text(encoding="utf-8"))
+                for spec_path in args.spec
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            if args.spec_output:
+                Path(args.spec_output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.spec_output).write_text(
+                    json.dumps(
+                        payload["combined_generator_ready_specs"],
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["valid"] else 2
+        if args.registry_command == "assemble-candidate":
+            payload = assemble_seed_candidate_registry(
+                source_root=args.source_root,
+                output_root=args.output_root,
+                selection_plan=json.loads(
+                    Path(args.selection_plan).read_text(encoding="utf-8")
+                ),
+                synthetic_specs=load_repository_synthesis_specs(args.synthetic_spec),
+                source_name=args.source_name,
+                overwrite_output=args.overwrite_output,
+                policy_config=(
+                    json.loads(Path(args.policy).read_text(encoding="utf-8"))
+                    if args.policy
+                    else None
+                ),
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1284,7 +1775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcome = _run_registry_scenario(
             ScenarioRegistry(args.registry),
             args.scenario_id,
-            load_config(args.config),
+            load_llm_config(args.config),
             Path(args.trace),
             args.random_seed,
             _agent_budgets(args),
@@ -1495,7 +1986,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             worker = _CLIRolloutWorker(
                 ScenarioRegistry(args.registry),
-                load_config(args.config),
+                load_llm_config(args.config),
                 Path(args.trace_directory),
                 _agent_budgets(args),
             )
@@ -1617,7 +2108,7 @@ class _CLIRolloutWorker:
     def __init__(
         self,
         registry: ScenarioRegistry,
-        config: PipelineConfig,
+        config: LLMConfig,
         trace_directory: Path,
         budgets: AgentBudgets | None = None,
     ):
@@ -1694,7 +2185,7 @@ def _rollout_outcome_from_existing_trace(trace_path: Path) -> RolloutOutcome:
 def _run_registry_scenario(
     registry: ScenarioRegistry,
     scenario_id: str,
-    config: PipelineConfig,
+    config: LLMConfig,
     trace_path: Path,
     random_seed: int,
     budgets: AgentBudgets | None = None,

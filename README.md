@@ -4,850 +4,202 @@
 
 # Easy Agentic Data
 
-**Build reproducible, verifiable agent trajectories for post-training.**
-
-A lightweight, headless framework that lets an LLM act as a user, another LLM act as an agent,
-and sandboxed tools turn their interaction into training data.
+**Generate reproducible, executable, and traceable agent training trajectories.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-6B7280)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-208%20total-22C55E)](tests/)
 [![Status](https://img.shields.io/badge/status-early%20development-F59E0B)](PLAN.md)
-
-[Quick Start](#quick-start) · [Architecture](#architecture) ·
-[Why Not Existing Agents](#why-not-use-an-existing-agent-framework) ·
-[Task Seeds](#task-seed-library) ·
-[Local Models](#local-llm-api) · [Documentation](#documentation)
 
 </div>
 
----
-
-Easy Agentic Data generates executable agent interaction data rather than isolated prompt-response
-pairs. It binds a query seed to a reproducible workspace, runs a tool-using agent inside a
-restricted environment, optionally simulates multi-turn user behavior, evaluates the resulting
-state, and preserves the complete trajectory for downstream training.
+Easy Agentic Data turns a task and a reproducible workspace into a verified interaction trace for
+SFT, preference optimization, reward modeling, or agent RL. The project owns the data contract
+around the agent: task provenance, hidden evaluator isolation, sandbox policy, event recording,
+deterministic verification, and derived exports.
 
 ```text
-query seed + workspace
-        |
-        v
-simulated user <-> headless agent <-> sandboxed tools
-                                      |
-                                      v
-                         deterministic evaluation
-                                      |
-                                      v
-                    SFT / preference / RL datasets
+seed + fixed workspace
+          |
+          v
+simulated user <-> headless agent <-> sandboxed coding tools
+                                           |
+                                           v
+                              deterministic evaluation
+                                           |
+                                           v
+                         canonical trace -> SFT / preference / RL
 ```
 
-## Why This Project?
-
-High-quality agent data needs more than fluent model output. It needs environments that can be
-reset, tools that can be governed, outcomes that can be checked, and traces that can be replayed.
-
-- **Environment-grounded**: Final workspace state and executable checks are the primary signals.
-- **Reproducible**: Seeds, immutable environment references, model settings, and tool events are
-  recorded.
-- **Verification-first**: Hard failures cannot be hidden by a high model-judge score.
-- **Provider-neutral**: Hosted and locally deployed OpenAI-compatible APIs share one interface.
-- **Training-neutral**: Export standard JSONL for SFT, preference optimization, and RL workflows.
-- **Headless by design**: No UI or browser automation is required for the core synthesis loop.
-
-## Why Not Use an Existing Agent Framework?
-
-Existing coding-agent frameworks are useful execution backends, but they are not the same as an
-agent-data factory. A framework such as Codex, Claude Code, OpenHands, or another tool-using agent
-can attempt a coding task, but Easy Agentic Data is responsible for the surrounding data contract:
-how tasks are seeded, how workspaces are recreated, how hidden evaluators stay isolated, how each
-tool decision is recorded, and how trajectories become reproducible training examples.
-
-The project therefore treats agent implementations as replaceable workers rather than as the
-source of truth. This keeps the core dataset independent of one provider, prompt, CLI, or log
-format.
-
-- **Trace ownership**: Training data needs a stable event schema with model responses, requested
-  tools, policy decisions, tool results, workspace diffs, verification results, and termination
-  reasons. External agents may expose logs, but their internal formats and guarantees can change.
-- **Hidden-context isolation**: Reference patches, hidden tests, evaluator state, and private user
-  facts must never be placed in the agent prompt or public trace. The data factory owns that
-  boundary instead of trusting a black-box runner to enforce it.
-- **Reproducible environments**: Each trajectory must trace back to a versioned query seed,
-  content-addressed workspace source, sandbox policy, setup commands, model parameters, and random
-  seed. Completing one task is not enough; the initial and final states must be auditable.
-- **Executable verification**: Success is decided primarily by deterministic checks against the
-  sandboxed workspace, not by the agent's final summary or a model judge. Hard failures cannot be
-  averaged away.
-- **Batch quality control**: Large-scale synthesis needs durable scheduling, shard-level budgets,
-  resume behavior, quality reports, review samples, and scale-up decisions. These controls sit
-  above any single agent loop.
-- **Backend neutrality**: The same registry and trace contract should support a small in-repo
-  headless agent, OpenAI-compatible models, local models, or future adapters around external agent
-  CLIs. Adding a backend should not redefine the dataset.
-
-In short, existing agents can be plugged in as workers when they can provide enough observable
-events, but the durable product is the reproducible scenario, trace, verifier, and export pipeline.
-
-## Task Seed Library
-
-The task seed library is a first-class part of the data factory, not a thin wrapper around one
-benchmark. Each seed records the public task, hidden user context, source lineage, license,
-permitted use, split, task family, source construction method, training eligibility, contamination
-tags, verifier types, and coverage tags. This makes the seed set auditable before any paid rollout
-starts.
-
-Benchmark datasets such as SWE-bench Lite are treated as validation or evaluation sources by
-default. They may be useful for smoke runs, verifier development, or held-out measurement, but they
-must not silently enter the training seed pool. Importers therefore mark known benchmark sources as
-`train_eligible=false` and attach contamination tags such as `benchmark_source`.
-
-The library is designed to cover the broader code-agent task space:
-
-| Task family | Examples | Primary verifier signal |
-| --- | --- | --- |
-| `bug_repair` | Failing issue, regression, runtime error | Hidden command, hidden test patch |
-| `feature_implementation` | Add a small API, CLI flag, UI state, or data path | Tests and required state |
-| `test_authoring` | Add missing unit/integration tests for existing behavior | Test diff and coverage checks |
-| `refactor` | Improve structure while preserving behavior | Existing tests and forbidden changes |
-| `dependency_upgrade` | Adapt code to a new library/runtime version | Build, import, and compatibility tests |
-| `migration` | Move config, schema, framework, or file layout | Required state and migration checks |
-| `security_hardening` | Close injection, path traversal, or secret-handling gaps | Adversarial tests |
-| `performance` | Remove algorithmic or I/O bottlenecks | Bounded benchmark or metric threshold |
-| `docs_examples` | Repair docs, examples, notebooks, or API snippets | Executable examples or doctests |
-| `ci_build` | Fix packaging, lint, type-check, or workflow failures | Reproduced command success |
-| `code_review` | Address review comments without hidden patch leakage | Targeted tests and diff constraints |
-| `repo_understanding` | Locate behavior, explain state, or plan a safe edit | Trace-quality and retrieval evidence |
-
-The recommended source mix is layered:
-
-- **Non-benchmark real repositories**: public issues, PRs, commits, CI failures, release migrations,
-  and review threads with compatible licenses and reproducible checkouts.
-- **Repository-grounded synthetic tasks**: mutation testing, fixture perturbations, generated issues,
-  dependency bumps, and doc/example breakages whose solvability is proven by execution.
-- **Directed risk tasks**: security, flaky-test, packaging, and long-context tasks synthesized to
-  cover rare but valuable agent behaviors.
-- **Held-out benchmarks**: benchmark-derived seeds stay in validation or evaluation partitions for
-  measurement and contamination checks.
-
-Use the registry importer to label seeds at ingestion time, then audit the library before running a
-batch:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
-  --root runs/registry \
-  --source seeds.jsonl \
-  --format swe-bench \
-  --source-name curated-nonbenchmark-issues \
-  --task-family test-authoring \
-  --source-method curated_issue_workspace \
-  --train-eligible true \
-  --license MIT
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-audit \
-  --root runs/registry \
-  --output runs/registry/seed-audit.json
-```
-
-For trainable non-benchmark seeds, prefer local exports of public issue, PR, and CI failure records
-rather than benchmark rows. The importers require a fixed 40-character source revision, record the
-public repository and license, keep evaluator commands hidden, and only mark a seed train-eligible
-when its license is in the permissive allowlist:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
-  --root runs/train-registry \
-  --source examples/public-issue-pr-seeds.jsonl \
-  --format public-issue-pr \
-  --source-name curated-public-issues \
-  --train-eligible auto \
-  --allow-train-license Apache-2.0
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry import \
-  --root runs/train-registry \
-  --source examples/public-ci-seeds.jsonl \
-  --format public-ci \
-  --source-name curated-public-ci \
-  --train-eligible auto \
-  --allow-train-license Apache-2.0
-```
-
-Repository-grounded synthetic seeds use a local synthesis spec rather than benchmark rows. The
-default generator creates task seeds for test authoring, refactoring, dependency upgrades,
-migrations, docs/examples, security hardening, performance, CI/build repair, code review, and
-repo-understanding. Each generated seed must have family-appropriate verifier evidence such as
-tests, build commands, doctests, adversarial tests, benchmark thresholds, diff constraints, or
-retrieval requirements:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry generate-synthetic \
-  --root runs/train-registry \
-  --source examples/repository-synthesis.json \
-  --source-name curated-repository-synthetic
-```
-
-The sample files under `examples/` define the source-record contract. Replace the placeholder
-repository URI and fixed revision with licensed, reproducible repository snapshots before running
-production agent rollouts.
-
-Scale-up audits can also enforce coverage budgets and compare trainable seeds against held-out
-registries before a batch run:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-audit \
-  --root runs/train-registry \
-  --holdout-root runs/eval-registry \
-  --min-train-eligible 1000 \
-  --require-task-family bug-repair \
-  --require-task-family test-authoring \
-  --require-verifier-type hidden-command \
-  --max-task-family-share 0.40 \
-  --max-repository-share 0.10 \
-  --output runs/train-registry/seed-audit.json
-```
-
-When an audit fails, turn the measured gaps into a deterministic backfill plan before collecting
-or synthesizing more seeds:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-backfill-plan \
-  --audit runs/train-registry/seed-audit.json \
-  --policy examples/production-seed-corpus-policy.json \
-  --output runs/train-registry/seed-backfill-plan.json
-```
-
-The backfill plan separates minimum-count gaps, missing verifier evidence, source-method gaps,
-language coverage, and dominance caps. It also reports how many non-dominant records would be
-needed if the corpus kept every current seed, which makes it explicit when balanced sampling is a
-better next step than simply adding more data.
-
-After planning the missing records, create a deterministic seed-selection plan for the current
-candidate registry. The plan keeps the raw registry intact, selects the existing trainable seeds
-that fit final share caps, and reserves slots for future synthetic or cross-language backfill:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-selection-plan \
-  --root runs/train-registry \
-  --policy examples/production-seed-corpus-policy.json \
-  --output runs/train-registry/seed-selection-plan.json
-```
-
-The selection plan is a runbook, not an approval. `ready_for_rollout` remains false while reserved
-backfill slots, missing verifier evidence, or decontamination gates are unresolved.
-
-Turn the reserved repository-grounded slots into a synthetic backfill spec plan before generation:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry seed-synthetic-backfill-spec \
-  --root runs/train-registry \
-  --selection-plan runs/train-registry/seed-selection-plan.json \
-  --backfill-plan runs/train-registry/seed-backfill-plan.json \
-  --output runs/train-registry/synthetic-backfill-spec-plan.json \
-  --spec-output runs/train-registry/generator-ready-synthetic-spec.json
-```
-
-The full plan separates generator-ready specs from draft specs that still need evidence. Only pass
-the `generator-ready-synthetic-spec.json` output to `registry generate-synthetic`; draft specs must
-first receive family-appropriate verifier evidence such as doctests, executable examples,
-benchmarks, or performance thresholds.
-
-Scenario-level audits compare trainable scenarios against held-out evaluator oracles without
-exposing oracle text to the agent. They fail when trainable scenarios reuse held-out hidden test
-commands, reference artifacts, patch/test-patch hashes, or source-instance metadata:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry scenario-audit \
-  --root runs/train-registry \
-  --holdout-root runs/eval-registry \
-  --output runs/train-registry/scenario-audit.json
-```
-
-Create a stratified human-review queue before approving production data. The queue samples by task
-family, difficulty, source method, and verifier type, and writes JSONL records with the public
-query, reproducibility metadata, verifier summary, and review questions:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry review-queue \
-  --root runs/train-registry \
-  --sample-per-stratum 2 \
-  --output runs/train-registry/seed-review.jsonl \
-  --overwrite
-```
-
-For a production-corpus gate, prefer a single seed-corpus config that imports train and holdout
-sources, runs seed and scenario audits, writes the human-review queue, and freezes a manifest for
-pilot or shard selection:
-
-The checked-in production starting point is
-`examples/production-seed-corpus-policy.json` plus
-`examples/production-repository-allowlist.json`. These files define the first 1,000-seed target,
-coverage gates, review and pilot phases, and ten verified public Python repository candidates.
-They are intentionally not a scale approval: the policy keeps `scale_decision.approved=false`
-until real source exports, registry materialization, decontamination audits, human review, and a
-pilot rollout pass. The allowlist now satisfies the 10% maximum repository-share threshold for a
-1,000-seed corpus, but it remains Python-only, so the language-share gate still requires later
-cross-language or non-Python source expansion before scale-up. The demo commands below use toy
-sources that run locally; for the production candidate allowlist, start with:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \
-  --source examples/production-repository-allowlist.json \
-  --output runs/seed-corpus-demo/production-repository-allowlist-audit.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-plan \
-  --allowlist examples/production-repository-allowlist.json \
-  --output runs/seed-corpus-demo/production-source-collection-plan.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-shards \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --source-output runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --summary-output-dir runs/seed-corpus-demo/source-shard-summaries \
-  --preflight-output-dir runs/seed-corpus-demo/source-shard-preflights \
-  --github-token-env GITHUB_TOKEN \
-  --require-github-token \
-  --shard-size 4 \
-  --limit-per-task 100 \
-  --resume \
-  --allow-partial \
-  --sleep-seconds 2 \
-  --output runs/seed-corpus-demo/production-source-shards.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-shard-status \
-  --schedule runs/seed-corpus-demo/production-source-shards.json \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --output runs/seed-corpus-demo/production-source-shard-status.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-preflight \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --github-token-env GITHUB_TOKEN \
-  --require-github-token \
-  --task-offset 0 \
-  --max-tasks 4 \
-  --output runs/seed-corpus-demo/production-source-preflight.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-export \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --output runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --summary-output runs/seed-corpus-demo/production-source-export-summary.json \
-  --github-token-env GITHUB_TOKEN \
-  --require-github-token \
-  --limit-per-task 100 \
-  --max-tasks 4 \
-  --resume \
-  --allow-partial \
-  --sleep-seconds 2
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-retry-plan \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --export-summary runs/seed-corpus-demo/production-source-export-summary.json \
-  --output runs/seed-corpus-demo/production-source-retry-plan.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-retry-run \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --retry-plan runs/seed-corpus-demo/production-source-retry-plan.json \
-  --output runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --summary-output runs/seed-corpus-demo/production-source-retry-run-summary.json \
-  --github-token-env GITHUB_TOKEN \
-  --require-github-token \
-  --limit-per-task 100 \
-  --max-retry-tasks 4 \
-  --allow-partial \
-  --sleep-seconds 2
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-summary \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --summary runs/seed-corpus-demo/production-source-export-summary.json \
-  --summary runs/seed-corpus-demo/production-source-retry-run-summary.json \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --output runs/seed-corpus-demo/production-source-merged-summary.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
-  --source runs/seed-corpus-demo/production-public-source-records.jsonl \
-  --allowlist examples/production-repository-allowlist.json \
-  --output runs/seed-corpus-demo/production-source-collection-audit.json \
-  --accepted-output runs/seed-corpus-demo/production-public-source-records-clean.jsonl
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
-  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
-  --allowlist examples/production-repository-allowlist.json \
-  --output runs/seed-corpus-demo/production-source-collection-audit-clean.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-summary \
-  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
-  --summary runs/seed-corpus-demo/production-source-export-summary.json \
-  --summary runs/seed-corpus-demo/production-source-retry-run-summary.json \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --output runs/seed-corpus-demo/production-source-merged-summary-clean.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-readiness \
-  --plan runs/seed-corpus-demo/production-source-collection-plan.json \
-  --export-summary runs/seed-corpus-demo/production-source-merged-summary-clean.json \
-  --audit runs/seed-corpus-demo/production-source-collection-audit-clean.json \
-  --min-accepted 1000 \
-  --max-quarantined 0 \
-  --require-source-type public_issue \
-  --require-source-type public_pr \
-  --require-source-type public_ci \
-  --require-clean-export \
-  --require-all-plan-tasks \
-  --output runs/seed-corpus-demo/production-source-readiness.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-split \
-  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
-  --output runs/seed-corpus-demo/production-public-issue-pr-source-records-clean.jsonl \
-  --summary-output runs/seed-corpus-demo/production-public-issue-pr-source-summary-clean.json \
-  --include-source-type public_issue \
-  --include-source-type public_pr
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-split \
-  --source runs/seed-corpus-demo/production-public-source-records-clean.jsonl \
-  --output runs/seed-corpus-demo/production-public-ci-source-records-clean.jsonl \
-  --summary-output runs/seed-corpus-demo/production-public-ci-source-summary-clean.json \
-  --include-source-type public_ci
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
-  --root runs/seed-corpus-demo/production-import-rehearsal \
-  --source runs/seed-corpus-demo/production-public-issue-pr-source-records-clean.jsonl \
-  --format public-issue-pr \
-  --source-name production-public-python-sources \
-  --allowlist examples/production-repository-allowlist.json \
-  --overwrite-registry \
-  --min-imported 1 \
-  --max-quarantined 0 \
-  --min-train-eligible 1 \
-  --require-verifier-type hidden-command \
-  --output runs/seed-corpus-demo/production-import-rehearsal.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry import-rehearsal \
-  --root runs/seed-corpus-demo/production-ci-import-rehearsal \
-  --source runs/seed-corpus-demo/production-public-ci-source-records-clean.jsonl \
-  --format public-ci \
-  --source-name production-public-python-ci \
-  --allowlist examples/production-repository-allowlist.json \
-  --overwrite-registry \
-  --min-imported 1 \
-  --max-quarantined 0 \
-  --require-task-family ci-build \
-  --require-verifier-type hidden-command \
-  --output runs/seed-corpus-demo/production-ci-import-rehearsal.json
-```
-
-`collection-shards` writes a deterministic shard runbook from the collection plan, including each
-shard's task offset, source-type mix, output paths, and exact `collection-preflight` and
-`collection-export` arguments. `collection-shard-status` reads that runbook plus any local
-preflight reports, shard export summaries, and source JSONL to report each shard's current state
-and next action. It exits nonzero until every scheduled shard has a completed export summary, so a
-production operator can tell whether to run preflight, run export, resolve a local blocker, plan a
-retry, or inspect a malformed artifact before merging summaries. `collection-preflight` checks the
-local plan, selected shard, optional source JSONL, optional summary files, and required GitHub
-authentication before a networked export starts. It never prints or stores token values; it records
-only whether the named environment variable is configured.
-`collection-export` reads the plan and writes normalized public issue/PR JSONL records. It can use
-unauthenticated GitHub API access for small probes, or a token read from an environment variable
-with `--github-token-env GITHUB_TOKEN` when rate limits require it. Production runs should also set
-`--require-github-token` so a missing token fails locally before any anonymous request can create
-misleading rate-limit summaries. Use `--max-tasks`, `--task-offset`, `--resume`, and
-`--sleep-seconds` to shard and resume collection without duplicating source-instance IDs.
-`--allow-partial` is useful for rate-limited runs because valid records are still written and can
-be audited while failed tasks remain visible in the summary. Each new export summary includes
-per-task outcomes. `collection-retry-plan` turns failed, skipped, missing-outcome, or
-not-yet-selected collection tasks into explicit retry shards with task IDs, repositories, source
-types, and
-`--task-offset N --max-tasks 1` arguments. `collection-retry-run` consumes that retry plan and
-executes those single-task shards against the same source JSONL with resume enabled, so a
-rate-limited run can continue from machine-readable retry metadata instead of hand-copied
-commands. `collection-summary` then rebuilds a readiness-compatible export summary from the final
-source JSONL plus every export and retry-run summary. The final JSONL is the record-count source of
-truth, so resumed shards and retries cannot double-count records, while unresolved task failures
-remain visible before readiness. `collection-audit --accepted-output` preserves the raw audit and
-also writes a clean JSONL containing only records that pass allowlist, fixed-revision, license,
-public-URL, and private-data checks. If any record is quarantined, the raw audit exits nonzero while
-still writing the clean accepted output for follow-up readiness and import rehearsal gates. CI
-collection tasks export
-`public_ci` records from failed workflow runs with fixed head SHAs and `ci_commands` verifier
-evidence. Import issue/PR and CI records through their matching formats: the public issue/PR
-importer still rejects CI records, while `--format public-ci` maps CI commands to hidden verifier
-commands for `ci_build` seeds. `collection-readiness` combines the collection plan, merged export
-summary, and audit output into the registry-import gate: small probes can lower `--min-accepted`,
-while production runs should require the policy target, issue, PR, and CI records, the clean merged
-summary, zero quarantine in the clean audit, and full plan-task coverage. `collection-split` then
-routes the clean mixed export into
-importer-specific shards so issue/PR and CI rehearsals cannot accidentally consume each other's
-record types. `import-rehearsal` imports each audited trainable source shard into a temporary
-registry, applies the allowlist, runs registry validation and seed-audit gates, and writes a
-pre-materialization summary. When source records point at local `file://` workspace caches, add
-`--materialize-sample-count N`,
-`--materialize-root ...`, and optionally `--run-hidden-commands` to prove sampled scenarios can be
-materialized and their hidden verifier commands pass before model rollout. This gate intentionally
-fails for records that only have non-local source URIs, because those records are not yet tied to a
-local reproducible workspace. Until real exported records exist, use the toy demo below to validate
-the end-to-end local gate mechanics:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry allowlist-audit \
-  --source examples/repository-allowlist.json \
-  --output runs/seed-corpus-demo/repository-allowlist-audit.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-plan \
-  --allowlist examples/repository-allowlist.json \
-  --output runs/seed-corpus-demo/source-collection-plan.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry collection-audit \
-  --source examples/public-issue-pr-seeds.jsonl \
-  --allowlist examples/repository-allowlist.json \
-  --output runs/seed-corpus-demo/source-collection-audit.json
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli registry build-corpus \
-  --config examples/seed-corpus.json \
-  --overwrite-outputs
-```
-
-The manifest's `valid` field means the corpus passed local registry, coverage, decontamination,
-and review-queue gates. It does not approve a large provider run by itself; `approved_for_scale`
-only becomes true when the manifest is valid and the run-specific scale decision explicitly records
-approval after human review and pilot quality checks. When the config declares a repository
-allowlist, train-source records and repository-grounded synthetic specs outside that allowlist are
-quarantined before import and counted against the configured quarantine budget. The collection plan
-turns approved repositories into local issue/PR export tasks, while the collection audit checks
-that exported source records include public title/body/labels, source URLs, fixed revisions,
-licenses, languages, source-instance IDs, and candidate verifier evidence before import.
-
-The policy gate fails when the trainable pool is too small, a required task family or verifier is
-missing, one family/source/repository/language dominates the trainable pool, or a trainable seed
-overlaps held-out seeds by normalized issue text, provenance, source instance, or repository.
-For repository-understanding tasks, `agent-run` also evaluates trace-quality metadata by checking
-that the recorded trace contains retrieval evidence and a final answer.
-
-## Capabilities
-
-| Area | Included |
-| --- | --- |
-| Agent runtime | Multi-turn model loop, function tools, user questions, bounded retries |
-| Sandboxing | Rootless Docker, resource limits, read-only root filesystem, network policy |
-| Scenario registry | Query seeds, public and hidden context, fixed environment sources |
-| User simulation | Rule-based and LLM-backed simulated users |
-| Tracing | Versioned append-only JSONL events, artifact storage, deterministic replay |
-| Evaluation | Hidden commands, required state, forbidden state, policy integrity |
-| Dataset construction | SFT, chosen/rejected preference pairs, RL and analysis exports |
-| Batch execution | Persistent jobs, retries, resume, budgets, rate limits, call cache |
-| Governance | Sensitive-data scanning, retention controls, leakage validation |
-
-## Architecture
-
-```mermaid
-flowchart LR
-    A["Query Seed Registry"] --> B["Scenario Materializer"]
-    W["Workspace Source<br/>fixed commit or fixture"] --> B
-    B --> C["Scenario Instance"]
-    C --> D["Simulated User"]
-    C --> E["Headless Agent"]
-    D <--> E
-    E --> F["Policy-Governed Tools"]
-    F --> G["Docker Sandbox"]
-    G --> H["Workspace State"]
-    C --> I["Append-Only Trace"]
-    D --> I
-    E --> I
-    F --> I
-    H --> J["Deterministic Evaluators"]
-    I --> J
-    J --> K["SFT / Preference / RL Exports"]
-```
-
-The public task context is separated from hidden user and evaluator context. Hidden answers are
-never placed in agent prompts or public trace events. See the
-[trace schema](docs/trace-schema.md) and [threat model](docs/threat-model.md) for the exact
-boundaries.
+## Core Guarantees
+
+- **Executable evidence**: workspace state, hidden tests, and policy checks determine success.
+- **Reproducibility**: fixed source revisions, environment specifications, model settings, and
+  random seeds are recorded.
+- **Complete lineage**: every derived record points back to a canonical append-only trace.
+- **Hidden-context isolation**: evaluator tests, reference patches, and private user facts never
+  enter model prompts or public traces.
+- **Provider neutrality**: hosted and local OpenAI-compatible models share one adapter contract.
+- **Safe execution**: coding tools run through a deny-by-default policy inside a bounded sandbox.
+
+The core package does not contain model trainers and does not use an LLM judge as a replacement
+for executable verification.
 
 ## Quick Start
 
-### 1. Run the reproducible demo
-
-The core package requires only Python 3.10+ and the standard library.
-
-```bash
-git clone https://github.com/COK-ZhangZiliang/Easy-Agentic-Data.git
-cd Easy-Agentic-Data
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli run \
-  --config examples/minimal.json
-```
-
-The mock-backed demo writes a complete local run under `runs/local-demo/`, so it does not require
-an API key or network access.
-
-```text
-runs/local-demo/
-├── manifest.json
-├── llm_calls.jsonl
-├── tasks.jsonl
-├── trajectories.jsonl
-├── sft.jsonl
-└── preferences.jsonl
-```
-
-### 2. Install the development command
-
-```bash
-python3 -m pip install -e '.[dev]'
-ead run --config examples/minimal.json
-```
-
-### 3. Run the tests
-
-```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-```
-
-## Synthesis Tiers
-
-The project separates synthesis into three tiers so smoke tests, complex synthetic trajectories,
-and production-style registry rollouts are not confused with one another:
-
-```bash
-ead synthesis tiers
-```
-
-| Tier | Purpose | Default path |
-| --- | --- | --- |
-| `smoke` | Cheap provider and export-path checks | `ead run --config examples/minimal.json` |
-| `complex_synthetic` | Multi-step agent trajectory validation without external repos | `ead synthesis complex-demo --output runs/complex-synthetic-demo` |
-| `registry_backed` | Production-style query/workspace seeds in Docker | `ead synthesis real-seed-demo ...` or `ead registry import ...` then `ead agent-run ...` |
-
-The complex synthetic tier creates a repository-like fixture, asks the simulated user for missing
-requirements, reads and patches files, runs a visible test, inspects a diff, runs hidden
-evaluation, and writes SFT, RL, analysis, and replayable trace artifacts:
+Run the deterministic local synthesis path. It uses the real headless agent, tool policy, trace,
+evaluation, replay, and export contracts without Docker, network access, or a paid model:
 
 ```bash
 PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis complex-demo \
   --output runs/complex-synthetic-demo
 ```
 
-For a real registry-backed slice, use the SWE-bench Lite dataset as the seed source. The command
-downloads a small page of rows, clones the referenced GitHub repository at `base_commit` into a
-local cache, imports the scenario into the registry, and keeps the gold patch and test patch hidden
-from public prompts and traces:
+The command writes:
+
+- `trace.jsonl`: canonical append-only trajectory;
+- `report.json`: deterministic evaluation and reward evidence;
+- `sft.json`, `rl_episode.json`, and `analysis.json`: derived training/analysis views;
+- `manifest.json`: IDs and artifact paths for the run.
+
+Replay the trace without calling a model or executing tools:
 
 ```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
-  --output runs/real-seed-demo \
-  --dataset princeton-nlp/SWE-bench_Lite \
-  --split dev \
-  --limit 1
+PYTHONPATH=src python3 -m easy_agentic_data.cli replay \
+  --trace runs/complex-synthetic-demo/trace.jsonl
 ```
 
-When Docker is running and a live DeepSeek key is available, add the thinking-enabled config to
-produce one real model/tool trajectory. For repository-specific images built locally, pass the
-content-addressed image id as `sha256:<image-id>`. The Docker sandbox exposes `/workspace` on
-`PYTHONPATH`; add setup commands only for offline preparation that writes inside `/workspace`.
-For Python package metadata, install editable packages into the workspace prefix rather than the
-read-only container root filesystem:
+Install the CLI and run the default tests:
 
 ```bash
-export DEEPSEEK_API_KEY=...
-export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
-  --output runs/real-seed-demo \
-  --config examples/deepseek-v4-flash-thinking.json \
-  --trace runs/real-seed-demo/trace.jsonl \
-  --image-digest sha256:<local-image-id> \
-  --setup-command 'python -m pip install --no-deps --no-build-isolation -e . --prefix /workspace/.ead_prefix' \
-  --max-agent-tokens 200000
+python3 -m pip install -e .
+PYTHONPATH=src python3 -m unittest discover -s tests
+python3 -m ruff check .
 ```
 
-## Local LLM API
+## Canonical Workflow
 
-Use `local_openai_compatible` with a local or private chat-completions server such as vLLM,
-SGLang, llama.cpp, or an OpenAI-compatible Ollama deployment:
+### 1. Define or import a scenario
+
+A scenario binds three contracts:
+
+- `QuerySeed`: public task plus provenance, license, split, and optional hidden user state;
+- `EnvironmentSpec`: fixed repository revision, image digest, setup, health checks, and limits;
+- `HiddenEvaluatorContext`: hidden commands, test patches, required state, and forbidden changes.
+
+The registry validates these contracts and materializes the same initial workspace for every
+rollout. Benchmark-derived sources are non-training by default.
 
 ```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli run \
-  --config examples/local-openai-compatible.json
-```
-
-```json
-{
-  "provider": "local_openai_compatible",
-  "model": "Qwen/Qwen3-8B",
-  "base_url": "http://127.0.0.1:8000/v1",
-  "api_key_env": null,
-  "chat_completions_path": "/chat/completions"
-}
-```
-
-Authentication is optional. Set `api_key_env` to an environment variable name when the endpoint
-requires a Bearer token. Tool-use trajectories require the serving stack and chat template to
-support OpenAI function calling.
-
-For a hosted OpenAI-compatible endpoint:
-
-```bash
-export OPENAI_API_KEY=...
-ead run --config examples/openai-compatible.json
-```
-
-### DeepSeek V4 Flash
-
-The repository includes a configuration for DeepSeek's OpenAI-compatible API. It disables
-thinking mode for routine structured generation and tool loops, reducing token use and avoiding
-provider-specific reasoning context when it is not needed:
-
-```bash
-export DEEPSEEK_API_KEY=...
-ead run --config examples/deepseek-v4-flash.json
-```
-
-On macOS, prefer keeping the DeepSeek key in Keychain and injecting it only for the command that
-needs it. The command substitution below must not be logged with shell tracing enabled:
-
-```bash
-DEEPSEEK_API_KEY="$(security find-generic-password -a "$USER" -s deepseek-api-key -w)" \
-  ead run --config examples/deepseek-v4-flash.json
-```
-
-If a managed network uses a private certificate authority, point `SSL_CERT_FILE` at an approved CA
-bundle. TLS verification remains enabled:
-
-```bash
-export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
-```
-
-DeepSeek thinking mode is supported by the client when enabled through `llm.request_body`.
-Assistant `reasoning_content` is sent back during the active provider conversation because
-DeepSeek requires it for continued reasoning, and assistant reasoning from generated agent
-responses is preserved in raw trajectories and training exports as an explicit training signal.
-Evaluator-only and hidden-context reasoning must not be mixed into agent training records. Keep
-thinking disabled unless a scenario benefits from it. See the [DeepSeek API documentation](https://api-docs.deepseek.com/)
-for current model and protocol details.
-
-Use `examples/deepseek-v4-flash-thinking.json` or
-`examples/deepseek-v4-pro-thinking.json` for live registry-backed coding trajectories that need
-thinking mode and tool calls. The Pro config uses DeepSeek's official `deepseek-v4-pro` model name.
-Both thinking configs set:
-
-```json
-{
-  "thinking": {
-    "type": "enabled"
-  },
-  "reasoning_effort": "high"
-}
-```
-
-## Sandboxed Agent Runs
-
-Agent and batch runs use rootless Docker. A scenario binds the agent query to an immutable
-environment source, capability policy, hidden evaluator checks, and reset procedure.
-
-```bash
-ead registry validate --root registry/
-ead registry list --root registry/
-
 ead registry import \
-  --root registry/ \
-  --source examples/swe-style-seeds.jsonl \
-  --format swe-bench \
-  --source-name sample/swe-style \
-  --split train \
-  --license MIT
+  --root runs/registry \
+  --source examples/public-issue-pr-seeds.jsonl \
+  --format public-issue-pr \
+  --source-name curated-public-sources \
+  --train-eligible auto \
+  --allow-train-license Apache-2.0
 
+ead registry validate --root runs/registry
+ead registry seed-audit --root runs/registry
+```
+
+Example source files use placeholder repositories. Production seeds must point to licensed,
+public, fixed revisions and reproducible workspaces.
+
+### 2. Run the headless agent
+
+Provider configuration contains only model-connection settings. Secrets are read from the named
+environment variable and never stored in the configuration file.
+
+```bash
 ead agent-run \
-  --registry registry/ \
+  --registry runs/registry \
   --scenario-id scenario_... \
   --config examples/local-openai-compatible.json \
-  --trace runs/agent.jsonl
+  --trace runs/traces/trajectory.jsonl
 ```
 
-Replay a trace without calling a model or executing a tool:
+Docker is the production isolation boundary. `MemorySandbox` exists only for deterministic local
+tests and demos.
+
+### 3. Verify and export
+
+The evaluator operates after the agent stops and has access to hidden state that the agent never
+sees. Hard failures keep a trajectory out of successful-training exports. Raw traces remain
+immutable; exporters create new SFT, preference, RL, and analysis records.
+
+Preference pairs require a positive deterministic reward margin. SFT exports include only
+hard-verified successful trajectories. RL records retain actions, masks, rewards, and termination
+reasons.
+
+### 4. Pilot before scale
+
+Use the persistent scheduler for repeated rollouts only after a small scenario set passes source,
+materialization, verifier, leakage, and decontamination checks.
 
 ```bash
-ead replay --trace runs/agent.jsonl
+ead batch enqueue \
+  --registry runs/registry \
+  --database runs/jobs.sqlite3 \
+  --model local-model \
+  --config-hash config-v1 \
+  --rollouts 2
+
+ead batch run \
+  --registry runs/registry \
+  --database runs/jobs.sqlite3 \
+  --config examples/local-openai-compatible.json \
+  --trace-directory runs/traces
+
+ead batch report \
+  --database runs/jobs.sqlite3 \
+  --trace-directory runs/traces \
+  --output runs/quality-report.json
 ```
 
-### Importing Query and Workspace Seeds
+Scale decisions should use replay validity, executable success, infrastructure-failure rate,
+hidden-content leakage, duplicate rate, coverage, reward distribution, cost, and stratified human
+review. A large source collection is not evidence of trajectory quality.
 
-The registry importer accepts local JSON or JSONL records shaped like public issue/PR exports,
-SWE-bench, SWE-smith, and Multi-SWE-bench exports. Each imported record creates:
+## Data Quality Gates
 
-- a `QuerySeed` from the issue or problem statement;
-- an `EnvironmentSpec` from the repository, fixed revision, image, setup, and health metadata;
-- a `Scenario` that binds the query seed to the workspace and keeps evaluator details hidden.
+A production trajectory is eligible only when:
 
-```bash
-ead registry import \
-  --root registry/ \
-  --source path/to/swe-style-records.jsonl \
-  --format auto \
-  --source-name SWE-bench/SWE-smith \
-  --split train \
-  --license MIT \
-  --permitted-use research
+1. the task has licensed provenance and a fixed, reproducible workspace;
+2. public task text is separated from hidden user and evaluator context;
+3. the trace is schema-valid, complete, and deterministically replayable;
+4. all required hard evaluators pass after a clean reset;
+5. no credential, personal data, benchmark oracle, or held-out evaluator content leaks;
+6. the derived record preserves trace, scenario, model, prompt, tool, and verifier lineage;
+7. corpus-level duplication, balance, contamination, and sampled human quality gates pass.
+
+## Architecture
+
+```text
+src/easy_agentic_data/
+├── seeds/, environments/, scenarios.py  # task and workspace contracts
+├── registry.py                          # validation and materialization
+├── agent/                               # headless interaction loop and budgets
+├── coding_tools.py, policy.py           # sandboxed coding capabilities
+├── sandbox/                             # Docker and in-memory backends
+├── traces/                              # append-only events, artifacts, replay
+├── evaluation.py                        # deterministic evaluators and rewards
+├── trace_exporters.py                   # SFT, preference, RL, analysis views
+├── simulation.py                        # optional multi-turn user simulation
+├── batch.py                             # scheduling, recovery, quality reports
+└── registry_sources.py, seed_corpus.py  # source adapters and corpus quality gates
 ```
 
-The importer records gold patches and test patches as hidden source references plus SHA-256
-hashes. It does not place raw reference patches or hidden test IDs in public scenario views.
-If a source provides test identifiers instead of executable commands, keep them in evaluator
-metadata or provide a safe command template such as
-`--test-command-template 'python -m pytest {test}'` for compatible repositories.
+The scenario, trace, and evaluator contracts are the source of truth. Model providers, agent
+implementations, seed sources, and training frameworks are replaceable adapters.
 
-For non-benchmark public issue and PR exports, use `--format public-issue`,
-`--format public-pr`, or `--format public-issue-pr`. Each record must include a repository source
-URI, a fixed commit in `source_revision` or `base_commit`, a license, and public task text from
-`query`, `problem_statement`, or `title` plus `body`. Optional fields such as `labels`, `language`,
-`test_commands`, `build_commands`, `benchmark_commands`, `adversarial_tests`,
-`example_commands`, `doctest_commands`, `required_state`, `forbidden_state`,
-`diff_constraints`, `patch`, and `test_patch` drive task-family inference and verifier metadata.
-Non-allowlisted licenses are imported as non-trainable unless the caller explicitly allows them.
+## Provider Configuration
 
-For repository-grounded synthetic generation, use `ead registry generate-synthetic --source`.
-The source file contains one or more repository specs with `repository`, `source_uri`,
-`source_revision` or `base_commit`, `license`, `language`, optional sandbox setup fields, and one
-or more `targets`. Target fields such as `paths`, `test_commands`, `build_commands`,
-`ci_commands`, `doctest_commands`, `example_commands`, `benchmark_commands`,
-`adversarial_tests`, `migration_commands`, `required_state`, `forbidden_state`,
-`diff_constraints`, `performance_threshold`, `retrieval_requirements`, and
-`trace_quality_rubric` provide the verifier evidence required by each task family. A minimal
-shape is:
+Use `examples/openai-compatible.json` for hosted APIs and
+`examples/local-openai-compatible.json` for a local endpoint. Hosted providers fail fast when the
+configured credential environment variable is missing. Local providers may set `api_key_env` to
+`null`.
 
-```json
-{
-  "repository": "example/tool",
-  "source_uri": "https://github.com/example/tool.git",
-  "source_revision": "ffffffffffffffffffffffffffffffffffffffff",
-  "license": "MIT",
-  "language": "Python",
-  "targets": [
-    {
-      "name": "parser",
-      "paths": ["src/tool/parser.py"],
-      "test_commands": ["python -m pytest tests/test_parser.py"],
-      "build_commands": ["python -m build"],
-      "doctest_commands": ["python -m doctest README.md"],
-      "benchmark_commands": ["python benchmarks/parser_bench.py --max-ms 50"],
-      "adversarial_tests": ["python -m pytest tests/security/test_parser.py"],
-      "diff_constraints": ["do not rename the public Parser API"],
-      "retrieval_requirements": ["cite src/tool/parser.py"]
-    }
-  ]
-}
-```
-
-### Docker on macOS
-
-The validated macOS setup uses Docker CLI with Colima:
-
-```bash
-brew install docker colima
-colima start --cpu 2 --memory 4 --disk 20 --vm-type vz
-
-EAD_RUN_DOCKER_TESTS=1 PYTHONPATH=src \
-  python3 -m unittest tests.test_docker_integration -v
-```
-
-`MemorySandbox` is used by unit tests for speed. It is not a production security boundary.
-
-Paid live-provider tests are opt-in and never run by default:
+Paid live tests are opt-in:
 
 ```bash
 EAD_RUN_LIVE_LLM_TESTS=1 EAD_RUN_DOCKER_TESTS=1 \
@@ -855,283 +207,29 @@ DEEPSEEK_API_KEY=... PYTHONPATH=src \
   python3 -m unittest tests.test_live_llm_integration -v
 ```
 
-## Batch Synthesis
+## Migration from the Legacy Demo
 
-The persistent scheduler supports idempotent jobs, retries, interrupted-run recovery, budgets,
-rate limits, health checks, and cached model calls.
-
-```bash
-ead batch enqueue \
-  --registry registry/ \
-  --database runs/jobs.sqlite3 \
-  --model local-model \
-  --config-hash config-v1 \
-  --rollouts 4
-
-ead batch run \
-  --registry registry/ \
-  --database runs/jobs.sqlite3 \
-  --config examples/local-openai-compatible.json \
-  --trace-directory runs/traces
-
-ead batch status --database runs/jobs.sqlite3
-```
-
-For a 50-trace DeepSeek V4 Pro pilot on real registry-backed workspaces, first prepare 50 fixed
-seed/workspace pairs, enqueue one rollout per scenario, run with a conservative single worker, and
-write a quality report plus a deterministic human-review sample:
-
-```bash
-export DEEPSEEK_API_KEY=...
-export SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli synthesis real-seed-demo \
-  --output runs/ds-v4-pro-pilot-50 \
-  --dataset princeton-nlp/SWE-bench_Lite \
-  --split dev \
-  --limit 50
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch enqueue \
-  --registry runs/ds-v4-pro-pilot-50/registry \
-  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
-  --model deepseek-v4-pro \
-  --config-hash deepseek-v4-pro-thinking-v1 \
-  --rollouts 1
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
-  --registry runs/ds-v4-pro-pilot-50/registry \
-  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
-  --config examples/deepseek-v4-pro-thinking.json \
-  --trace-directory runs/ds-v4-pro-pilot-50/traces \
-  --max-workers 1 \
-  --max-jobs 50 \
-  --max-agent-tokens 250000
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch report \
-  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
-  --trace-directory runs/ds-v4-pro-pilot-50/traces \
-  --output runs/ds-v4-pro-pilot-50/quality-report.json \
-  --review-sample runs/ds-v4-pro-pilot-50/review-sample.jsonl \
-  --sample-size 10
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch audit-traces \
-  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
-  --trace-directory runs/ds-v4-pro-pilot-50/traces \
-  --output runs/ds-v4-pro-pilot-50/trace-logic-audit.json
-```
-
-When the key is stored in macOS Keychain, inject it for the paid batch command without writing it
-to shell startup files, tracked configs, logs, or run artifacts:
-
-```bash
-DEEPSEEK_API_KEY="$(security find-generic-password -a "$USER" -s deepseek-api-key -w)" \
-SSL_CERT_FILE=/path/to/trusted-ca-bundle.pem \
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
-  --registry runs/ds-v4-pro-pilot-50/registry \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --config examples/deepseek-v4-pro-thinking.json \
-  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
-  --max-workers 2 \
-  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-index 0 \
-  --max-agent-tokens 350000 \
-  --max-agent-seconds 1200
-```
-
-Before scaling a paid provider run, select scenario groups that showed enough executable signal in
-the pilot instead of blindly amplifying every imported seed. The selector reports per-scenario
-success, hidden-test, agent-stop, infrastructure, token, and tool-call rates, then writes the
-scenario IDs that satisfy the configured thresholds:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch select-scale-candidates \
-  --database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
-  --audit runs/ds-v4-pro-pilot-50/trace-logic-audit.json \
-  --output runs/ds-v4-pro-pilot-50/scale-candidates.json \
-  --min-rollouts 2 \
-  --min-success-rate 0.5 \
-  --min-hidden-command-pass-rate 0.5 \
-  --min-all-non-agent-pass-rate 0.5 \
-  --min-agent-stop-rate 0.5 \
-  --min-high-quality-rate 0.5 \
-  --min-closed-loop-rate 0.8 \
-  --min-multi-step-complex-rate 0.8 \
-  --min-average-tool-calls 6
-```
-
-Use the selection file when creating the larger queue so low-signal or environment-noisy scenario
-groups do not consume the scale-up budget:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch enqueue \
-  --registry runs/ds-v4-pro-pilot-50/registry \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --model deepseek-v4-pro \
-  --config-hash deepseek-v4-pro-thinking-scale-v1 \
-  --rollouts 20 \
-  --selection-file runs/ds-v4-pro-pilot-50/scale-candidates.json
-```
-
-Estimate the queued scale-up before starting paid requests. The estimate uses observed pilot token
-usage per scenario and writes deterministic shards with explicit job IDs:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch estimate-scale \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --pilot-database runs/ds-v4-pro-pilot-50/jobs.sqlite3 \
-  --output runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-size 20
-```
-
-Check a shard before and after running it:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch shard-status \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-index 0 \
-  --output runs/ds-v4-pro-scale-candidates/shard-0-status.json
-```
-
-Preview the exact pending jobs before approving provider spend. Dry runs only read the scheduler and
-selection files; they do not load provider configuration, create Docker sandboxes, or call the
-model:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
-  --registry runs/ds-v4-pro-pilot-50/registry \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --config examples/deepseek-v4-pro-thinking.json \
-  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
-  --max-workers 2 \
-  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-index 0 \
-  --max-agent-tokens 350000 \
-  --max-agent-seconds 1200 \
-  --dry-run
-```
-
-After reviewing the estimate and approving provider spend, run one exact shard at a time:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch run \
-  --registry runs/ds-v4-pro-pilot-50/registry \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --config examples/deepseek-v4-pro-thinking.json \
-  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
-  --max-workers 2 \
-  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-index 0 \
-  --max-agent-tokens 350000 \
-  --max-agent-seconds 1200
-```
-
-Then report only that shard before deciding whether to continue:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch report \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
-  --output runs/ds-v4-pro-scale-candidates/quality-report-shard-0.json \
-  --review-sample runs/ds-v4-pro-scale-candidates/review-sample-shard-0.jsonl \
-  --overwrite-review-sample \
-  --sample-size 10 \
-  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-index 0
-
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch audit-traces \
-  --database runs/ds-v4-pro-scale-candidates/jobs.sqlite3 \
-  --trace-directory runs/ds-v4-pro-scale-candidates/traces \
-  --output runs/ds-v4-pro-scale-candidates/trace-logic-audit-shard-0.json \
-  --job-id-file runs/ds-v4-pro-scale-candidates/estimate.json \
-  --shard-index 0
-```
-
-Gate the next shard on the completed shard's status and quality:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch decide-continuation \
-  --report runs/ds-v4-pro-scale-candidates/quality-report-shard-0.json \
-  --status runs/ds-v4-pro-scale-candidates/shard-0-status.json \
-  --audit runs/ds-v4-pro-scale-candidates/trace-logic-audit-shard-0.json \
-  --min-high-quality-rate 0.5 \
-  --min-closed-loop-rate 0.8 \
-  --min-multi-step-complex-rate 0.8 \
-  --output runs/ds-v4-pro-scale-candidates/decision-shard-0.json
-```
-
-For a single review artifact before spending on a shard, combine the pilot selection, queue
-estimate, shard status, trace audit, and continuation decision. A clean pre-run shard reports
-`pre_run_ready: true`; a completed shard that clears the quality gates reports
-`continuation_ready: true`:
-
-```bash
-PYTHONPATH=src python3 -m easy_agentic_data.cli batch scale-readiness \
-  --selection runs/ds-v4-pro-pilot-50/scale-candidates.json \
-  --estimate runs/ds-v4-pro-scale-candidates/estimate.json \
-  --status runs/ds-v4-pro-scale-candidates/shard-0-status.json \
-  --audit runs/ds-v4-pro-scale-candidates/trace-logic-audit-shard-0.json \
-  --decision runs/ds-v4-pro-scale-candidates/decision-shard-0.json \
-  --output runs/ds-v4-pro-scale-candidates/readiness-shard-0.json
-```
-
-## Data Outputs
-
-| Artifact | Purpose |
-| --- | --- |
-| `manifest.json` | Run configuration, provenance, and aggregate statistics |
-| `llm_calls.jsonl` | Prompt hashes, model parameters, usage, latency, retries, and status |
-| `tasks.jsonl` | Generated and evolved task blueprints |
-| `trajectories.jsonl` | Complete conversations, tool events, and verification results |
-| `sft.jsonl` | Highest-reward accepted trajectory for each task |
-| `preferences.jsonl` | Chosen/rejected pairs with a positive deterministic margin |
-
-Raw trajectories are preserved. Export stages create derived views and never rewrite the source
-trace in place.
-
-## Project Layout
-
-```text
-src/easy_agentic_data/
-├── agent/             # Headless agent runtime
-├── environments/      # Reproducible environment contracts
-├── llm/               # Hosted, local, observed, and mock model clients
-├── sandbox/           # Docker and in-memory sandbox backends
-├── seeds/             # Query seed and hidden/public context contracts
-├── traces/            # Event schema, artifact store, recorder, and replay
-├── batch.py           # Persistent synthesis scheduler
-├── coding_tools.py    # Sandboxed coding-tool implementations
-├── evaluation.py      # Deterministic trajectory and state evaluation
-├── generation.py      # Task generation and difficulty evolution
-├── governance.py      # Sensitive-data and retention controls
-├── registry.py        # Scenario storage, validation, and materialization
-├── real_seed_sources.py # Real seed download, repository clone, and registry preparation
-├── registry_sources.py # External SWE-style seed-source import adapters
-├── simulation.py      # Simulated user implementations
-├── synthesis_tiers.py # Smoke, complex synthetic, and registry-backed synthesis paths
-└── trace_exporters.py # SFT, preference, RL, and analysis exports
-```
+The calculator-oriented `ead run` path and its separate task, runner, verifier, and exporter
+models were removed. Use `ead synthesis complex-demo` for a local contract smoke and `ead
+agent-run` or `ead batch run` for registry-backed trajectories. Provider JSON files now contain
+only an `llm` object; rollout selection, budgets, and output paths belong to the command that runs
+the scenario. Canonical task and trajectory APIs are `Scenario` and append-only `Trace`.
 
 ## Documentation
 
-- [Research and design](docs/research-and-design.md): synthesis approaches and adopted design
-- [Implementation plan](PLAN.md): milestones, exit criteria, and progress
-- [Development contract](AGENTS.md): engineering, testing, documentation, and Git rules
-- [Trace schema](docs/trace-schema.md): event contracts and migration policy
-- [Sandbox ADR](docs/adr-0001-docker-sandbox.md): Docker isolation decision
-- [RL episode ADR](docs/adr-0002-rl-episode-export.md): action/loss-mask export contract
-- [Synthesis tiers ADR](docs/adr-0003-synthesis-tiers.md): smoke, complex synthetic, and registry-backed contract
-- [Threat model](docs/threat-model.md): trust boundaries, risks, and controls
+- [PLAN.md](PLAN.md): active priorities and measurable exit gates
+- [AGENTS.md](AGENTS.md): development, safety, and validation contract
+- [Trace schema](docs/trace-schema.md): canonical event and migration rules
+- [Threat model](docs/threat-model.md): protected assets and trust boundaries
+- [Docker sandbox ADR](docs/adr-0001-docker-sandbox.md)
+- [RL export ADR](docs/adr-0002-rl-episode-export.md)
+- [Synthesis path ADR](docs/adr-0003-synthesis-tiers.md)
 
-## Development Status
+## Status
 
-Easy Agentic Data is in early development. The core vertical slice is implemented and tested:
-scenario materialization, sandboxed agent execution, simulated users, trace replay, deterministic
-evaluation, dataset exports, and recoverable batch synthesis. Interfaces may still evolve before
-the first stable release.
-
-Contributions should follow [AGENTS.md](AGENTS.md). Every functional change must include relevant
-tests, and all repository documentation and code comments must be written in English.
+The canonical local trajectory path is implemented and tested. Registry-backed production
+synthesis still requires a small verified seed set, end-to-end export wiring, a measured provider
+pilot, and a frozen dataset manifest. See [PLAN.md](PLAN.md) for the current sequence.
 
 ## License
 

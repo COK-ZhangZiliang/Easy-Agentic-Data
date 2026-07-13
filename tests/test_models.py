@@ -1,66 +1,21 @@
 import unittest
 
-from easy_agentic_data.exporters import preference_to_training, trajectory_to_sft
-from easy_agentic_data.models import Message, PreferencePair, Task, Trajectory
+from easy_agentic_data.models import Message, stable_id
 
 
 class ModelTests(unittest.TestCase):
-    def test_task_id_is_stable(self) -> None:
-        left = Task(instruction="Do the thing", category="test")
-        right = Task(instruction="Do the thing", category="test")
-        self.assertEqual(left.task_id, right.task_id)
-
-    def test_trajectory_id_depends_on_messages(self) -> None:
-        task = Task(instruction="Answer")
-        left = Trajectory(task, [Message("user", "A"), Message("assistant", "B")])
-        right = Trajectory(task, [Message("user", "A"), Message("assistant", "C")])
-        self.assertNotEqual(left.trajectory_id, right.trajectory_id)
-
-    def test_trajectory_id_depends_on_assistant_reasoning(self) -> None:
-        task = Task(instruction="Answer")
-        left = Trajectory(
-            task,
-            [Message("user", "A"), Message("assistant", "B", reasoning_content="first")],
-        )
-        right = Trajectory(
-            task,
-            [Message("user", "A"), Message("assistant", "B", reasoning_content="second")],
-        )
-
-        self.assertNotEqual(left.trajectory_id, right.trajectory_id)
-
-    def test_assistant_reasoning_is_preserved_in_training_records(self) -> None:
-        task = Task(instruction="Answer")
-        chosen = Trajectory(
-            task,
-            [
-                Message("user", "Prompt", reasoning_content="ignored user reasoning"),
-                Message("assistant", "B", reasoning_content="chosen reasoning"),
-            ],
-        )
-        rejected = Trajectory(
-            task,
-            [Message("assistant", "C", reasoning_content="rejected reasoning")],
-        )
-        pair = PreferencePair(task, chosen, rejected, margin=1.0)
-
-        serialized = chosen.to_dict()
-        self.assertNotIn("reasoning_content", serialized["messages"][0])
-        self.assertEqual(serialized["messages"][1]["reasoning_content"], "chosen reasoning")
-        sft = trajectory_to_sft(chosen)
-        self.assertEqual(sft["messages"][1]["reasoning_content"], "chosen reasoning")
-        serialized_pair = pair.to_dict()
+    def test_stable_id_is_order_independent(self) -> None:
         self.assertEqual(
-            serialized_pair["chosen"]["messages"][1]["reasoning_content"],
-            "chosen reasoning",
+            stable_id("item", {"a": 1, "b": 2}),
+            stable_id("item", {"b": 2, "a": 1}),
         )
-        self.assertEqual(
-            serialized_pair["rejected"]["messages"][0]["reasoning_content"],
-            "rejected reasoning",
-        )
-        preference = preference_to_training(pair)
-        self.assertEqual(preference["chosen"][0]["reasoning_content"], "chosen reasoning")
-        self.assertEqual(preference["rejected"][0]["reasoning_content"], "rejected reasoning")
+
+    def test_training_message_keeps_only_assistant_reasoning(self) -> None:
+        user = Message("user", "Prompt", reasoning_content="private user note")
+        assistant = Message("assistant", "Answer", reasoning_content="model reasoning")
+
+        self.assertNotIn("reasoning_content", user.to_training_dict())
+        self.assertEqual(assistant.to_training_dict()["reasoning_content"], "model reasoning")
 
 
 if __name__ == "__main__":

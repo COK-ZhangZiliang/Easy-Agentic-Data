@@ -5,9 +5,8 @@ import unittest
 from pathlib import Path
 
 from easy_agentic_data.agent import AgentBudgets, HeadlessAgent
-from easy_agentic_data.cli import build_pipeline
 from easy_agentic_data.coding_tools import CodingToolRuntime
-from easy_agentic_data.config import GenerationConfig, LLMConfig, OutputConfig, PipelineConfig
+from easy_agentic_data.config import LLMConfig
 from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.llm.observability import ObservedLLMClient
 from easy_agentic_data.llm.openai_compatible import OpenAICompatibleClient
@@ -38,29 +37,6 @@ def _live_config() -> LLMConfig:
     "Set EAD_RUN_LIVE_LLM_TESTS=1 to run paid live LLM integration tests",
 )
 class LiveLLMIntegrationTests(unittest.TestCase):
-    def test_real_synthesis_pipeline(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            config = PipelineConfig(
-                run_name="live-llm-pipeline",
-                llm=_live_config(),
-                generation=GenerationConfig(
-                    num_tasks=1,
-                    rollouts_per_task=1,
-                    max_turns=4,
-                    min_reward=0.7,
-                    seed_topics=["calculation"],
-                    evolve_rounds=0,
-                ),
-                output=OutputConfig(directory=directory),
-            )
-
-            summary = build_pipeline(config).run()
-
-            self.assertEqual(summary["tasks"], 1)
-            self.assertEqual(summary["trajectories"], 1)
-            self.assertEqual(summary["selected"], 1)
-            self.assertTrue((Path(directory) / "sft.jsonl").read_text(encoding="utf-8").strip())
-
     @unittest.skipUnless(
         os.environ.get("EAD_RUN_DOCKER_TESTS") == "1",
         "Set EAD_RUN_DOCKER_TESTS=1 to run the live Docker agent test",

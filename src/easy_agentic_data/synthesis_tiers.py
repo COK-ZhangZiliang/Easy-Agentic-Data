@@ -17,7 +17,6 @@ from easy_agentic_data.evaluation import (
     derive_turn_rewards,
     finalize_evaluation_trace,
 )
-from easy_agentic_data.exporters import write_json
 from easy_agentic_data.models import LLMResponse, Message
 from easy_agentic_data.policy import ToolPolicy
 from easy_agentic_data.sandbox import CommandResult, MemorySandbox
@@ -46,21 +45,6 @@ class SynthesisTier:
 
 def default_synthesis_tiers() -> list[SynthesisTier]:
     return [
-        SynthesisTier(
-            tier_id="smoke",
-            purpose="Cheap provider and export-path smoke tests.",
-            runtime="Lightweight AgentRunner with function tools.",
-            data_shape="Single-turn or short tool-use tasks such as calculator calls.",
-            verifier_signal="Structural, tool-execution, and semantic checks.",
-            default_command="ead run --config examples/minimal.json",
-            artifacts=[
-                "tasks.jsonl",
-                "trajectories.jsonl",
-                "sft.jsonl",
-                "preferences.jsonl",
-                "llm_calls.jsonl",
-            ],
-        ),
         SynthesisTier(
             tier_id="complex_synthetic",
             purpose="Exercise multi-turn agent trajectories before using external workspaces.",
@@ -176,10 +160,10 @@ def run_complex_synthetic_demo(output: str | Path) -> dict[str, Any]:
     sft = trace_to_sft(trace, report)
     episode = trace_to_rl_episode(trace, report)
     analysis = analysis_record(trace, report)
-    write_json(output_path / "report.json", report.to_dict())
-    write_json(output_path / "sft.json", sft)
-    write_json(output_path / "rl_episode.json", episode)
-    write_json(output_path / "analysis.json", analysis)
+    _write_json(output_path / "report.json", report.to_dict())
+    _write_json(output_path / "sft.json", sft)
+    _write_json(output_path / "rl_episode.json", episode)
+    _write_json(output_path / "analysis.json", analysis)
     summary = {
         "tier": "complex_synthetic",
         "trace": str(trace_path),
@@ -199,8 +183,15 @@ def run_complex_synthetic_demo(output: str | Path) -> dict[str, Any]:
             "analysis": str(output_path / "analysis.json"),
         },
     }
-    write_json(output_path / "manifest.json", summary)
+    _write_json(output_path / "manifest.json", summary)
     return summary
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 class _ComplexScriptedClient:

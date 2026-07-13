@@ -1,11 +1,13 @@
 import json
 import os
+import tempfile
 import unittest
 import urllib.error
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 
-from easy_agentic_data.config import LLMConfig
+from easy_agentic_data.config import LLMConfig, load_llm_config
 from easy_agentic_data.llm.openai_compatible import (
     LocalOpenAICompatibleClient,
     OpenAICompatibleClient,
@@ -28,6 +30,36 @@ class _FakeHTTPResponse:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_load_llm_config_reads_provider_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "provider.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "llm": {
+                            "provider": "local_openai_compatible",
+                            "model": "local-test-model",
+                            "base_url": "http://127.0.0.1:8000/v1",
+                            "api_key_env": None,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_llm_config(path)
+
+        self.assertEqual(config.provider, "local_openai_compatible")
+        self.assertEqual(config.model, "local-test-model")
+
+    def test_load_llm_config_requires_llm_object(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "provider.json"
+            path.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "llm"):
+                load_llm_config(path)
+
     def test_local_client_calls_server_without_api_key(self) -> None:
         config = LLMConfig(
             provider="local_openai_compatible",
@@ -41,8 +73,8 @@ class LLMClientTests(unittest.TestCase):
             {
                 "type": "function",
                 "function": {
-                    "name": "calculator",
-                    "description": "Add numbers.",
+                    "name": "read_file",
+                    "description": "Read one workspace file.",
                     "parameters": {"type": "object"},
                 },
             }
@@ -84,6 +116,7 @@ class LLMClientTests(unittest.TestCase):
     def test_provider_body_structured_output_and_reasoning_are_preserved(self) -> None:
         config = LLMConfig(
             provider="local_openai_compatible",
+            model="local-test-model",
             request_body={"thinking": {"type": "disabled"}, "user_id": "test-run"},
         )
         client = LocalOpenAICompatibleClient(config)
@@ -124,7 +157,7 @@ class LLMClientTests(unittest.TestCase):
         )
 
     def test_reasoning_context_is_sent_back_to_provider(self) -> None:
-        config = LLMConfig(provider="local_openai_compatible")
+        config = LLMConfig(provider="local_openai_compatible", model="local-test-model")
         client = LocalOpenAICompatibleClient(config)
         fake_response = _FakeHTTPResponse(
             {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
@@ -147,6 +180,7 @@ class LLMClientTests(unittest.TestCase):
     def test_retryable_http_error_is_retried(self) -> None:
         config = LLMConfig(
             provider="local_openai_compatible",
+            model="local-test-model",
             max_retries=1,
             retry_backoff_seconds=0,
         )
@@ -175,7 +209,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(response.retry_count, 1)
 
     def test_invalid_response_fails_with_context(self) -> None:
-        config = LLMConfig(provider="local_openai_compatible")
+        config = LLMConfig(provider="local_openai_compatible", model="local-test-model")
         client = LocalOpenAICompatibleClient(config)
         fake_response = _FakeHTTPResponse({"choices": []})
 
@@ -189,6 +223,7 @@ class LLMClientTests(unittest.TestCase):
     def test_local_client_uses_optional_api_key(self) -> None:
         config = LLMConfig(
             provider="local_openai_compatible",
+            model="local-test-model",
             api_key_env="EAD_LOCAL_API_KEY",
         )
         with patch.dict(os.environ, {"EAD_LOCAL_API_KEY": "local-secret"}, clear=True):
@@ -196,14 +231,22 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(client.api_key, "local-secret")
 
     def test_hosted_client_still_requires_api_key(self) -> None:
-        config = LLMConfig(api_key_env="EAD_TEST_MISSING_API_KEY")
+        config = LLMConfig(
+            provider="openai_compatible",
+            model="test-model",
+            api_key_env="EAD_TEST_MISSING_API_KEY",
+        )
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ValueError, "EAD_TEST_MISSING_API_KEY"):
                 OpenAICompatibleClient(config)
 
     def test_request_body_cannot_override_protocol_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved fields"):
-            LLMConfig(request_body={"model": "other"})
+            LLMConfig(
+                provider="openai_compatible",
+                model="test-model",
+                request_body={"model": "other"},
+            )
 
 
 if __name__ == "__main__":

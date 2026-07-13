@@ -1,34 +1,32 @@
-# ADR 0003: Synthesis Tier Contract
+# ADR 0003: Canonical Synthesis Paths
 
 ## Status
 
-Accepted.
+Accepted, superseding the earlier three-tier demo contract.
 
 ## Context
 
-The project has both a lightweight function-tool pipeline and a scenario-bound headless coding
-agent. Treating every successful run as equivalent hides important differences in data quality.
-A calculator smoke test proves provider connectivity and export plumbing, but it does not prove
-that the system can create realistic multi-turn agent trajectories grounded in a workspace.
+The repository previously exposed a calculator pipeline beside the scenario-bound headless coding
+agent. The two paths used different task, trajectory, tool, verifier, and export models, which made
+successful demos look equivalent even though only one path represented production data.
 
 ## Decision
 
-Easy Agentic Data exposes three synthesis tiers:
+All supported synthesis uses `HeadlessAgent`, scenario contracts, policy-governed tools,
+deterministic evaluation, canonical traces, and trace-derived exports.
 
-1. `smoke`: inexpensive provider and exporter validation through the lightweight pipeline.
-2. `complex_synthetic`: deterministic repository-like fixtures using `HeadlessAgent`,
-   `MemorySandbox`, simulated users, coding tools, hidden evaluation, replay, and derived exports.
-3. `registry_backed`: production-style query and workspace seeds materialized through the
-   scenario registry and executed in the Docker sandbox.
+Two execution environments remain:
 
-Each tier must state the runtime, expected data shape, verifier signal, and artifacts it produces.
-The `complex_synthetic` tier exists to prove complex trajectory support without relying on paid
-model calls or external repositories.
+1. `complex_synthetic`: a deterministic `MemorySandbox` fixture for fast local validation.
+2. `registry_backed`: fixed-revision workspaces executed in Docker for production trajectories.
+
+The local path validates the contract without paid APIs or external repositories. The
+registry-backed path is the production target. A new provider or worker may replace the model or
+agent implementation, but it must emit the same observable trace and evaluation evidence.
 
 ## Consequences
 
-- Smoke-test success must not be interpreted as complex data quality.
-- Complex synthetic demos can run in default CI because they do not call paid APIs, use networks,
-  or require Docker.
-- Registry-backed rollouts remain the target path for production-quality coding-agent data.
-- New tiers or materially changed tier semantics require README, PLAN, and test updates.
+- There is no separate lightweight task, runner, verifier, or exporter schema.
+- Local smoke success proves contract wiring, not production data quality.
+- Production readiness still requires materialization, hidden evaluation, replay, decontamination,
+  human review, and measured pilot results.

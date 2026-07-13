@@ -8,8 +8,8 @@ from typing import Any
 
 @dataclass
 class LLMConfig:
-    provider: str = "mock"
-    model: str = "mock-agent"
+    provider: str
+    model: str
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str | None = "OPENAI_API_KEY"
     chat_completions_path: str = "/chat/completions"
@@ -22,6 +22,10 @@ class LLMConfig:
     ca_bundle_env: str | None = "SSL_CERT_FILE"
 
     def __post_init__(self) -> None:
+        if self.provider not in {"openai_compatible", "local_openai_compatible"}:
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        if not self.model.strip():
+            raise ValueError("model must be non-empty")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if self.max_tokens <= 0:
@@ -36,44 +40,11 @@ class LLMConfig:
             raise ValueError(f"request_body cannot override reserved fields: {sorted(conflicts)}")
 
 
-@dataclass
-class GenerationConfig:
-    num_tasks: int = 4
-    rollouts_per_task: int = 2
-    max_turns: int = 6
-    min_reward: float = 0.5
-    seed_topics: list[str] = field(
-        default_factory=lambda: ["calculation", "information lookup", "planning"]
-    )
-    evolve_rounds: int = 1
+def load_llm_config(path: str | Path) -> LLMConfig:
+    """Load the provider settings used by headless agent rollouts."""
 
-
-@dataclass
-class OutputConfig:
-    directory: str = "runs/demo"
-    export_sft: bool = True
-    export_preferences: bool = True
-
-
-@dataclass
-class PipelineConfig:
-    run_name: str = "demo"
-    random_seed: int = 42
-    llm: LLMConfig = field(default_factory=LLMConfig)
-    generation: GenerationConfig = field(default_factory=GenerationConfig)
-    output: OutputConfig = field(default_factory=OutputConfig)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> PipelineConfig:
-        return cls(
-            run_name=data.get("run_name", "demo"),
-            random_seed=int(data.get("random_seed", 42)),
-            llm=LLMConfig(**data.get("llm", {})),
-            generation=GenerationConfig(**data.get("generation", {})),
-            output=OutputConfig(**data.get("output", {})),
-        )
-
-
-def load_config(path: str | Path) -> PipelineConfig:
     with Path(path).open("r", encoding="utf-8") as handle:
-        return PipelineConfig.from_dict(json.load(handle))
+        data = json.load(handle)
+    if not isinstance(data, dict) or not isinstance(data.get("llm"), dict):
+        raise ValueError("Configuration must contain an 'llm' object")
+    return LLMConfig(**data["llm"])
