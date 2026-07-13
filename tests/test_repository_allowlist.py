@@ -98,6 +98,32 @@ class RepositoryAllowlistTests(unittest.TestCase):
         self.assertEqual(len(allowed), 1)
         self.assertEqual(summary.quarantined, 0)
 
+    def test_filter_records_uses_original_uri_for_materialized_workspaces(self) -> None:
+        allowed, summary = filter_records_by_allowlist(
+            [
+                {
+                    **_source_record(),
+                    "source_uri": "file:///tmp/example-tool-workspace",
+                    "workspace_materialized": True,
+                    "workspace_original_source_uri": "https://github.com/example/tool.git",
+                },
+                {
+                    **_source_record(),
+                    "id": "issue-2",
+                    "source_uri": "file:///tmp/other-tool-workspace",
+                    "workspace_materialized": True,
+                    "workspace_original_source_uri": "https://github.com/other/tool.git",
+                },
+            ],
+            [_allowlist_record()],
+            source_name="curated-materialized-public-issues",
+        )
+
+        self.assertEqual(len(allowed), 1)
+        self.assertEqual(summary.allowed, 1)
+        self.assertEqual(summary.quarantined, 1)
+        self.assertIn("source URI does not match allowlist", summary.issues[0])
+
     def test_cli_allowlist_audit_writes_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "allowlist.json"

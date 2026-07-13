@@ -264,10 +264,11 @@ def _record_allowlist_issue(
     source_uri = _record_source_uri(record)
     if not source_uri:
         return f"record {index}: missing source URI"
+    allowlist_source_uri = _record_allowlist_source_uri(record, source_uri)
     allowed_source_uri = _text(allowlist.get("source_uri"))
-    if allowed_source_uri and _normalize_source_uri(source_uri) != _normalize_source_uri(
-        allowed_source_uri
-    ):
+    if allowed_source_uri and _normalize_source_uri(
+        allowlist_source_uri
+    ) != _normalize_source_uri(allowed_source_uri):
         return f"record {index}: source URI does not match allowlist for {repository}"
     license_name = _normalize_label(record.get("license") or allowlist.get("license"))
     allowlist_license = _normalize_label(allowlist.get("license"))
@@ -295,6 +296,12 @@ def _record_source_uri(record: dict[str, Any]) -> str:
     if repository:
         return f"https://github.com/{repository}.git"
     return ""
+
+
+def _record_allowlist_source_uri(record: dict[str, Any], source_uri: str) -> str:
+    if source_uri.startswith("file://") and bool(record.get("workspace_materialized")):
+        return _text(record.get("workspace_original_source_uri")) or source_uri
+    return source_uri
 
 
 def _collection_sources(record: dict[str, Any]) -> list[str]:

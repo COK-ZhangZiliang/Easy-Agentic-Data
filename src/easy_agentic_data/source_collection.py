@@ -15,7 +15,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from easy_agentic_data.repository_allowlist import (
-    AllowlistFilterSummary,
     audit_repository_allowlist,
     filter_records_by_allowlist,
 )
@@ -1407,7 +1406,9 @@ def merge_source_export_summaries(
     summary_allow_partial = allow_partial or any(
         bool(summary.get("allow_partial")) for summary in summary_list
     )
-    selected_tasks = len(selected_task_indexes) if selected_task_indexes else fallback_selected_tasks
+    selected_tasks = (
+        len(selected_task_indexes) if selected_task_indexes else fallback_selected_tasks
+    )
     return SourceExportSummary(
         plan_tasks=plan_tasks,
         task_offset=0,
@@ -2006,7 +2007,7 @@ def filter_accepted_public_source_records(
 def _export_task_records(
     task: dict[str, Any],
     *,
-    client: "_SourceClient",
+    client: _SourceClient,
     limit: int,
 ) -> tuple[list[dict[str, Any]], int]:
     if limit <= 0:
@@ -2048,7 +2049,7 @@ def _normalize_exported_record(
     raw_record: dict[str, Any],
     *,
     source_type: str,
-    client: "_SourceClient",
+    client: _SourceClient,
 ) -> dict[str, Any]:
     repository = _repository(task)
     number = int(raw_record.get("number") or 0)
@@ -2093,7 +2094,7 @@ def _normalize_ci_record(
     task: dict[str, Any],
     raw_record: dict[str, Any],
     *,
-    client: "_SourceClient",
+    client: _SourceClient,
 ) -> dict[str, Any]:
     repository = _repository(task)
     run_id = _text(raw_record.get("id") or raw_record.get("run_id") or raw_record.get("number"))
@@ -2136,7 +2137,7 @@ def _ci_source_revision(
     task: dict[str, Any],
     raw_record: dict[str, Any],
     *,
-    client: "_SourceClient",
+    client: _SourceClient,
 ) -> str:
     sha = _fixed_sha(raw_record.get("head_sha"))
     if sha:
@@ -2191,7 +2192,7 @@ def _source_revision_for_record(
     raw_record: dict[str, Any],
     *,
     source_type: str,
-    client: "_SourceClient",
+    client: _SourceClient,
 ) -> str:
     if source_type == "pull_request":
         base = raw_record.get("base")
@@ -2527,7 +2528,9 @@ def _source_instance_id(record: dict[str, Any]) -> str:
 
 
 def _source_type(record: dict[str, Any]) -> str:
-    explicit = _normalize_label(record.get("source_type") or record.get("type") or record.get("kind"))
+    explicit = _normalize_label(
+        record.get("source_type") or record.get("type") or record.get("kind")
+    )
     if explicit in {"pr", "pull_request", "public_pr"}:
         return "public_pr"
     if explicit in {"ci", "ci_failure", "workflow_run", "public_ci"}:

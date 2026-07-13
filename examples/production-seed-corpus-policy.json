@@ -1,6 +1,6 @@
 {
   "schema_version": "easy_agentic_data.seed_corpus_policy.v1",
-  "policy_name": "first-production-python-code-agent-corpus",
+  "policy_name": "first-production-cross-language-code-agent-corpus",
   "target_train_eligible": 1000,
   "seed_policy": {
     "min_train_eligible": 1000,
@@ -67,13 +67,13 @@
     "max_quarantined_records": 200
   },
   "current_candidate_status": {
-    "repository_candidates": 10,
+    "repository_candidates": 16,
     "minimum_repositories_required_by_share_cap": 10,
     "approved_for_scale": false,
     "remaining_requirements": [
-      "Add non-Python or cross-language sources before applying the 80% maximum language-share gate to the full corpus.",
-      "Run authenticated resumable collection-export shards with required GitHub token gating, collection-retry-plan, collection-retry-run, collection-summary, collection-audit, collection-readiness, collection-split, and format-specific import rehearsals for public issue, PR, and CI records from fixed commits.",
+      "Run authenticated resumable collection-export shards for the expanded cross-language allowlist with required GitHub token gating, collection-retry-plan, collection-retry-run, collection-summary, collection-audit, collection-readiness, collection-split, and format-specific import rehearsals for public issue, PR, and CI records from fixed commits.",
       "Run CI-specific import rehearsals with sampled materialization checks on production CI records before using them as trainable source records.",
+      "Curate hidden-test-patch evidence without exposing hidden evaluator content to generation models or using benchmark oracle patches.",
       "Generate repository-grounded synthetic backfill only for under-covered families and verifier types.",
       "Materialize train and holdout registries, then run seed and scenario decontamination audits.",
       "Approve a stratified human-review sample and a small DeepSeek V4 Pro pilot before larger shards."

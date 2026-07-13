@@ -329,8 +329,8 @@ def scenario_from_public_issue_pr_record(
     )
     command_groups = _public_command_groups(record, test_command_template)
     hidden_tests = _flatten_command_groups(command_groups)
-    patch = _text_field(_first_present(record, ("patch", "reference_patch", "gold_patch")))
-    test_patch = _text_field(_first_present(record, ("test_patch", "tests_patch")))
+    patch = _patch_text_field(_first_present(record, ("patch", "reference_patch", "gold_patch")))
+    test_patch = _patch_text_field(_first_present(record, ("test_patch", "tests_patch")))
     verifier_types = _public_verifier_types(
         record,
         command_groups,
@@ -430,6 +430,7 @@ def scenario_from_public_issue_pr_record(
             "test_patch_sha256": _sha256(test_patch),
             "patch_stored_as_reference": bool(patch),
             "test_patch_stored_as_reference": bool(test_patch),
+            **({"test_patch": test_patch} if test_patch else {}),
         },
     )
     return Scenario(
@@ -633,8 +634,8 @@ def scenario_from_swe_style_record(
     fail_to_pass = _list_field(_first_present(record, ("FAIL_TO_PASS", "fail_to_pass")))
     pass_to_pass = _list_field(_first_present(record, ("PASS_TO_PASS", "pass_to_pass")))
     hidden_tests = _hidden_test_commands(fail_to_pass, test_command_template)
-    patch = _text_field(_first_present(record, ("patch", "fix_patch", "gold_patch")))
-    test_patch = _text_field(_first_present(record, ("test_patch", "tests_patch")))
+    patch = _patch_text_field(_first_present(record, ("patch", "fix_patch", "gold_patch")))
+    test_patch = _patch_text_field(_first_present(record, ("test_patch", "tests_patch")))
     resolved_task_family = (
         _text_field(task_family).strip().lower().replace("-", "_")
         or default_task_family_for_swe_record(record, normalized_format)
@@ -1370,6 +1371,14 @@ def _text_field(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value).strip()
+
+
+def _patch_text_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 def _list_field(value: Any) -> list[str]:

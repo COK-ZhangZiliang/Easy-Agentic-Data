@@ -1,6 +1,6 @@
 {
   "schema_version": "easy_agentic_data.repository_allowlist.v1",
-  "source_verified_at": "2026-07-03",
+  "source_verified_at": "2026-07-04",
   "selection_policy": {
     "purpose": "First non-benchmark public repository candidates for production seed collection.",
     "license_policy": "Only permissive licenses accepted by DEFAULT_TRAIN_LICENSE_ALLOWLIST.",
@@ -167,6 +167,114 @@
         "https://github.com/fastapi/fastapi"
       ],
       "notes": "Public Python web framework with MIT license, tests directory, and active PR flow. Resolve exact base commits per exported record."
+    },
+    {
+      "repository": "axios/axios",
+      "source_uri": "https://github.com/axios/axios.git",
+      "license": "MIT",
+      "language": "JavaScript",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "feature"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["npm test"],
+      "build_commands": ["npm run build"],
+      "ci_commands": ["npm test", "npm run build"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/axios/axios",
+        "https://api.github.com/repos/axios/axios"
+      ],
+      "notes": "Public JavaScript HTTP client with MIT license, npm test/build scripts, and active issues/PRs. Resolve exact base commits and run source-instance overlap audits before training use."
+    },
+    {
+      "repository": "expressjs/express",
+      "source_uri": "https://github.com/expressjs/express.git",
+      "license": "MIT",
+      "language": "JavaScript",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "docs", "feature"],
+      "pr_labels": ["bug", "docs", "tests"],
+      "test_commands": ["npm test"],
+      "build_commands": ["npm run lint"],
+      "ci_commands": ["npm test", "npm run lint"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/expressjs/express",
+        "https://api.github.com/repos/expressjs/express"
+      ],
+      "notes": "Public JavaScript web framework with MIT license, npm test/lint scripts, and active issues/PRs. Resolve exact base commits and run source-instance overlap audits before training use."
+    },
+    {
+      "repository": "tokio-rs/tokio",
+      "source_uri": "https://github.com/tokio-rs/tokio.git",
+      "license": "MIT",
+      "language": "Rust",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "docs", "feature"],
+      "pr_labels": ["bug", "docs", "tests"],
+      "test_commands": ["cargo test --workspace"],
+      "build_commands": ["cargo build --workspace"],
+      "ci_commands": ["cargo test --workspace", "cargo build --workspace"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/tokio-rs/tokio",
+        "https://api.github.com/repos/tokio-rs/tokio"
+      ],
+      "notes": "Public Rust async runtime with MIT license, Cargo workspace metadata, and active issues/PRs. Resolve exact base commits and run source-instance overlap audits before training use."
+    },
+    {
+      "repository": "serde-rs/serde",
+      "source_uri": "https://github.com/serde-rs/serde.git",
+      "license": "Apache-2.0",
+      "language": "Rust",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "feature"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["cargo test --workspace"],
+      "build_commands": ["cargo build --workspace"],
+      "ci_commands": ["cargo test --workspace", "cargo build --workspace"],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/serde-rs/serde",
+        "https://api.github.com/repos/serde-rs/serde"
+      ],
+      "notes": "Public Rust serialization framework with Apache-2.0 license, Cargo workspace metadata, and active issues/PRs. Resolve exact base commits and run source-instance overlap audits before training use."
+    },
+    {
+      "repository": "gin-gonic/gin",
+      "source_uri": "https://github.com/gin-gonic/gin.git",
+      "license": "MIT",
+      "language": "Go",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "feature"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["go test ./..."],
+      "build_commands": ["go test ./..."],
+      "ci_commands": ["go test ./..."],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/gin-gonic/gin",
+        "https://api.github.com/repos/gin-gonic/gin"
+      ],
+      "notes": "Public Go web framework with MIT license, Go module metadata, and active issues/PRs. Resolve exact base commits and run source-instance overlap audits before training use."
+    },
+    {
+      "repository": "cli/cli",
+      "source_uri": "https://github.com/cli/cli.git",
+      "license": "MIT",
+      "language": "Go",
+      "collection_sources": ["issues", "pull_requests", "ci"],
+      "issue_labels": ["bug", "documentation", "enhancement"],
+      "pr_labels": ["bug", "documentation", "tests"],
+      "test_commands": ["go test ./..."],
+      "build_commands": ["go test ./..."],
+      "ci_commands": ["go test ./..."],
+      "benchmark_overlap": false,
+      "source_evidence": [
+        "https://github.com/cli/cli",
+        "https://api.github.com/repos/cli/cli"
+      ],
+      "notes": "Public Go command-line tool with MIT license, Go module metadata, and active issues/PRs. Resolve exact base commits and run source-instance overlap audits before training use."
     }
   ]
 }

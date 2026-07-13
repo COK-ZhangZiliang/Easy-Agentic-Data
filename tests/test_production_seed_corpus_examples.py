@@ -20,26 +20,29 @@ class ProductionSeedCorpusExampleTests(unittest.TestCase):
 
         audit = audit_repository_allowlist(records)
         self.assertTrue(audit.valid, [issue.code for issue in audit.issues])
-        self.assertEqual(audit.total, 10)
-        self.assertEqual(audit.approved, 10)
+        self.assertEqual(audit.total, 16)
+        self.assertEqual(audit.approved, 16)
         self.assertEqual(audit.blocked, 0)
         self.assertEqual(
             audit.license_counts,
-            {"apache_2.0": 1, "bsd_3_clause": 2, "mit": 7},
+            {"apache_2.0": 2, "bsd_3_clause": 2, "mit": 12},
         )
-        self.assertEqual(audit.language_counts, {"python": 10})
+        self.assertEqual(
+            audit.language_counts,
+            {"go": 2, "javascript": 2, "python": 10, "rust": 2},
+        )
         self.assertEqual(
             audit.collection_source_counts,
-            {"ci": 10, "issues": 10, "pull_requests": 10},
+            {"ci": 16, "issues": 16, "pull_requests": 16},
         )
 
         plan = build_source_collection_plan(
             records,
             output_root="runs/source-exports",
-            source_name="production-public-python-sources",
+            source_name="production-public-cross-language-sources",
         )
         self.assertTrue(plan["valid"], plan["allowlist_audit"]["issues"])
-        self.assertEqual(plan["total_tasks"], 30)
+        self.assertEqual(plan["total_tasks"], 48)
         self.assertEqual(
             {task["collection_source"] for task in plan["tasks"]},
             {"ci", "issues", "pull_requests"},
@@ -71,7 +74,7 @@ class ProductionSeedCorpusExampleTests(unittest.TestCase):
         )
         self.assertLessEqual(sum(coverage["min_task_family_counts"].values()), target)
         self.assertGreaterEqual(coverage["min_language_counts"]["python"], 700)
-        self.assertEqual(candidate_status["repository_candidates"], 10)
+        self.assertEqual(candidate_status["repository_candidates"], 16)
         self.assertGreaterEqual(
             candidate_status["repository_candidates"],
             candidate_status["minimum_repositories_required_by_share_cap"],
