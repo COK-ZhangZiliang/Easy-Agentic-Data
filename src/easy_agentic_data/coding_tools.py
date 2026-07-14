@@ -35,7 +35,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 DESCRIPTIONS = {
-    "list_files": "List workspace files under an optional relative directory with bounded output.",
+    "list_files": (
+        "List workspace files under an optional relative directory, excluding Git control data, "
+        "with bounded output."
+    ),
     "read_file": (
         "Read a UTF-8 text file at a workspace-relative path with bounded output. Optional "
         "offset and limit select 1-based line ranges."
@@ -93,7 +96,11 @@ class CodingToolRuntime:
 
     def _execute_allowed(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "list_files":
-            files = self.sandbox.list_files(arguments.get("path", "."))
+            files = [
+                path
+                for path in self.sandbox.list_files(arguments.get("path", "."))
+                if ".git" not in path.split("/")
+            ]
             return {
                 "files": files[:MAX_LIST_FILES],
                 "file_count": len(files),

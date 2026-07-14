@@ -149,6 +149,25 @@ class SandboxToolTests(unittest.TestCase):
         self.assertTrue(read.output["truncated"])
         self.assertEqual(sliced.output["content"], "two\nthree\n")
 
+    def test_list_files_omits_git_control_data(self) -> None:
+        sandbox = MemorySandbox(
+            {
+                ".git/config": "private control data\n",
+                ".git/objects/aa/bb": "object bytes\n",
+                "app.py": "value = 1\n",
+                "nested/.git/HEAD": "ref: refs/heads/main\n",
+                "nested/.gitkeep": "",
+            }
+        )
+        sandbox.create()
+        runtime = CodingToolRuntime(sandbox, ToolPolicy(["list_files"]))
+
+        listed = runtime.execute("list_files", {"path": "."})
+
+        self.assertEqual(listed.output["files"], ["app.py", "nested/.gitkeep"])
+        self.assertEqual(listed.output["file_count"], 2)
+        self.assertFalse(listed.output["truncated"])
+
     def test_git_diff_tool_returns_bounded_structured_output(self) -> None:
         sandbox = MemorySandbox({"app.py": "before\n"})
         sandbox.create()
