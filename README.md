@@ -224,12 +224,15 @@ the scenario. Canonical task and trajectory APIs are `Scenario` and append-only 
 - [Docker sandbox ADR](docs/adr-0001-docker-sandbox.md)
 - [RL export ADR](docs/adr-0002-rl-episode-export.md)
 - [Synthesis path ADR](docs/adr-0003-synthesis-tiers.md)
+- [Gold-20 freeze manifest ADR](docs/adr-0004-gold20-freeze-manifest.md)
 
 ## Status
 
-The canonical local trajectory path is implemented and tested. Registry-backed production
-synthesis still requires a small verified seed set, end-to-end export wiring, a measured provider
-pilot, and a frozen dataset manifest. See [PLAN.md](PLAN.md) for the current sequence.
+The canonical local trajectory path is implemented and tested. M1 is complete: the Gold-20
+executable seed set and its metadata-only manifest are frozen with reproducibility, verifier,
+decontamination, and production DockerSandbox evidence. M2 still requires registry-backed
+rollouts, end-to-end export wiring, and a measured provider pilot. See [PLAN.md](PLAN.md) for the
+current sequence.
 
 ## License
 

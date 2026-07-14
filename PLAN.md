@@ -29,13 +29,14 @@ Implemented foundations:
 
 Useful corpus evidence already produced in the current workspace:
 
-- 3,111 clean public source records across 16 repositories;
-- 128 materialized records with validated hidden commands;
-- 19 curated hidden-test patches that apply cleanly and fail on the original revision as expected.
+- frozen Gold-20 manifest `gold20_8757dfd30b43612a` across 8 repositories and 2 languages;
+- 20/20 fixed revisions reproduce the same workspace tree across clean resets;
+- 20/20 hidden patches apply and fail on the base tree, then pass after replaying retained,
+  byte-verified private reference repairs through the production Docker sandbox; zero evaluator
+  leaks, infrastructure failures, or unresolved contamination.
 
 This is not a production dataset. The registry-backed execution path still needs direct derived
-export wiring, a compact frozen pilot corpus, measured real-model trajectories, human review, and
-an immutable release manifest.
+export wiring, measured real-model trajectories, human review, and an immutable release manifest.
 
 ## M0: One Canonical Pipeline
 
@@ -69,20 +70,24 @@ Exit gate:
 
 **Goal:** freeze a small, diverse, fully verified corpus before collecting more data.
 
+**Status:** Complete.
+
 Tasks:
 
 - [x] Curate and rehearse 19 fixed-revision hidden-test-patch tasks.
-- [ ] Add one more task, then freeze exactly 20 pilot seeds with content hashes.
-- [ ] Require licensed provenance, reproducible materialization, stable setup/health commands, and
+- [x] Add one more task, then freeze exactly 20 pilot seeds with content hashes.
+- [x] Require licensed provenance, reproducible materialization, stable setup/health commands, and
   hidden evaluator isolation for every seed.
-- [ ] Run seed and scenario decontamination against benchmark and holdout registries.
-- [ ] Write a Gold-20 manifest containing scenario, workspace, evaluator, and source hashes.
+- [x] Run seed and scenario decontamination against benchmark and holdout registries.
+- [x] Write a Gold-20 manifest containing scenario, workspace, evaluator, and source hashes.
 
 Exit gate:
 
 - 20/20 seeds materialize from fixed revisions;
 - at least 8 repositories and 2 programming languages are represented;
 - every hidden patch applies, fails on the original workspace, and passes with a validated repair;
+- all base/fixed checks reproduce through the production Docker sandbox with the declared offline
+  runtime identities and policies;
 - zero evaluator leakage and zero unresolved contamination findings.
 
 The previous 100-task curation queue remains an optional candidate pool. Completing all remaining
@@ -144,6 +149,5 @@ Exit gate:
 
 ## Immediate Sequence
 
-1. Promote one additional verified seed and freeze Gold-20.
-2. Wire registry-backed trace exports and run the 40-trajectory pilot.
-3. Decide Dataset v1 scope from measured pilot evidence.
+1. Wire registry-backed trace exports and run the 40-trajectory pilot.
+2. Decide Dataset v1 scope from measured pilot evidence.

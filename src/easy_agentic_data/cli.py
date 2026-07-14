@@ -38,6 +38,8 @@ from easy_agentic_data.evaluation import (
     evaluation_result_metrics,
     finalize_evaluation_trace,
 )
+from easy_agentic_data.gold20 import freeze_gold20
+from easy_agentic_data.gold20_runtime import replay_gold20_runtime
 from easy_agentic_data.llm.observability import ObservedLLMClient
 from easy_agentic_data.llm.openai_compatible import (
     LocalOpenAICompatibleClient,
@@ -293,6 +295,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Overwrite append-only review queue outputs declared by the corpus config",
     )
+    freeze_gold20_parser = registry_subparsers.add_parser(
+        "freeze-gold-20",
+        help="Validate and freeze the exact Gold-20 corpus manifest",
+    )
+    freeze_gold20_parser.add_argument("--config", required=True)
+    freeze_gold20_parser.add_argument("--manifest-output", default="")
+    replay_gold20_parser = registry_subparsers.add_parser(
+        "replay-gold-20-runtime",
+        help="Replay Gold-20 repairs through the production Docker sandbox",
+    )
+    replay_gold20_parser.add_argument("--config", required=True)
+    replay_gold20_parser.add_argument("--output", default="")
     seed_backfill_parser = registry_subparsers.add_parser("seed-backfill-plan")
     seed_backfill_parser.add_argument("--audit", required=True)
     seed_backfill_parser.add_argument("--policy", required=True)
@@ -911,6 +925,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0 if manifest["valid"] else 2
+        if args.registry_command == "freeze-gold-20":
+            manifest = freeze_gold20(
+                args.config,
+                manifest_output=args.manifest_output or None,
+            )
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+            return 0 if manifest["valid"] else 2
+        if args.registry_command == "replay-gold-20-runtime":
+            replay = replay_gold20_runtime(
+                args.config,
+                output=args.output or None,
+            )
+            print(json.dumps(replay, indent=2, sort_keys=True))
+            return 0 if replay["valid"] else 2
         if args.registry_command == "allowlist-audit":
             audit = audit_repository_allowlist(
                 load_repository_allowlist(args.source),
