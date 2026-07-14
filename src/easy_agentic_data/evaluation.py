@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -8,8 +10,26 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from easy_agentic_data.sandbox import Sandbox
-from easy_agentic_data.scenarios import ScenarioInstance
-from easy_agentic_data.traces import EventType, TerminationReason, Trace, TraceRecorder
+from easy_agentic_data.scenarios import ScenarioInstance, json_payload_contains_string
+from easy_agentic_data.traces import (
+    EventType,
+    TerminationReason,
+    Trace,
+    TraceRecorder,
+    load_trace,
+)
+
+_PUBLIC_EVALUATOR_NAMES = frozenset(
+    {
+        "agent_termination",
+        "forbidden_state",
+        "hidden_command",
+        "hidden_test_patch",
+        "policy_integrity",
+        "required_state",
+        "trace_quality",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +41,23 @@ class EvaluationEvidence:
     evidence: dict[str, Any] = field(default_factory=dict)
     infrastructure_failure: bool = False
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> EvaluationEvidence:
+        data = _require_json_object(value, "evaluation evidence")
+        return cls(
+            evaluator=_require_string(data.get("evaluator"), "evaluation evidence.evaluator"),
+            passed=_require_bool(data.get("passed"), "evaluation evidence.passed"),
+            score=_require_finite_number(data.get("score"), "evaluation evidence.score"),
+            reason=_require_string(data.get("reason"), "evaluation evidence.reason"),
+            evidence=_require_json_object(
+                data.get("evidence", {}), "evaluation evidence.evidence"
+            ),
+            infrastructure_failure=_require_bool(
+                data.get("infrastructure_failure", False),
+                "evaluation evidence.infrastructure_failure",
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class TurnRewardEvidence:
@@ -31,6 +68,28 @@ class TurnRewardEvidence:
     reward: float
     reason: str
     evidence: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> TurnRewardEvidence:
+        data = _require_json_object(value, "turn reward evidence")
+        turn_index = _require_integer(
+            data.get("turn_index"), "turn reward evidence.turn_index"
+        )
+        if turn_index < 0:
+            raise ValueError("turn reward evidence.turn_index must be non-negative")
+        return cls(
+            turn_index=turn_index,
+            event_id=_require_string(data.get("event_id"), "turn reward evidence.event_id"),
+            kind=_require_string(data.get("kind"), "turn reward evidence.kind"),
+            action_type=_require_string(
+                data.get("action_type"), "turn reward evidence.action_type"
+            ),
+            reward=_require_finite_number(data.get("reward"), "turn reward evidence.reward"),
+            reason=_require_string(data.get("reason"), "turn reward evidence.reason"),
+            evidence=_require_json_object(
+                data.get("evidence", {}), "turn reward evidence.evidence"
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -45,6 +104,173 @@ class EvaluationReport:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> EvaluationReport:
+        data = _require_json_object(value, "evaluation report")
+        results = data.get("results")
+        turn_rewards = data.get("turn_rewards", [])
+        metrics = data.get("metrics", {})
+        if not isinstance(results, list) or not isinstance(turn_rewards, list):
+            raise ValueError("Evaluation results and turn rewards must be lists")
+        if not isinstance(metrics, dict):
+            raise ValueError("evaluation report.metrics must be an object")
+        parsed_results = []
+        for index, item in enumerate(results):
+            if not isinstance(item, dict):
+                raise ValueError(f"evaluation report.results[{index}] must be an object")
+            parsed_results.append(EvaluationEvidence.from_dict(item))
+        parsed_turn_rewards = []
+        for index, item in enumerate(turn_rewards):
+            if not isinstance(item, dict):
+                raise ValueError(f"evaluation report.turn_rewards[{index}] must be an object")
+            parsed_turn_rewards.append(TurnRewardEvidence.from_dict(item))
+        parsed_metrics: dict[str, float] = {}
+        for key, amount in metrics.items():
+            if not isinstance(key, str):
+                raise ValueError("evaluation report.metrics keys must be strings")
+            parsed_metrics[key] = _require_finite_number(
+                amount, f"evaluation report.metrics[{key!r}]"
+            )
+        return cls(
+            scenario_instance_id=_require_string(
+                data.get("scenario_instance_id"), "evaluation report.scenario_instance_id"
+            ),
+            results=parsed_results,
+            success=_require_bool(data.get("success"), "evaluation report.success"),
+            reward=_require_integer(data.get("reward"), "evaluation report.reward"),
+            infrastructure_failure=_require_bool(
+                data.get("infrastructure_failure"),
+                "evaluation report.infrastructure_failure",
+            ),
+            metrics=parsed_metrics,
+            turn_rewards=parsed_turn_rewards,
+        )
+
+
+def _require_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value
+
+
+def _require_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a boolean")
+    return value
+
+
+def _require_integer(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _require_finite_number(value: Any, field_name: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a finite number")
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be a finite number") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{field_name} must be a finite number")
+    return result
+
+
+def _require_json_object(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    _validate_json_value(value, field_name, set())
+    return dict(value)
+
+
+def _validate_json_value(value: Any, field_name: str, active: set[int]) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} contains a non-finite number")
+        return
+    if isinstance(value, (dict, list)):
+        identity = id(value)
+        if identity in active:
+            raise ValueError(f"{field_name} contains a recursive value")
+        active.add(identity)
+        try:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError(f"{field_name} contains a non-string object key")
+                    _validate_json_value(item, f"{field_name}.{key}", active)
+            else:
+                for index, item in enumerate(value):
+                    _validate_json_value(item, f"{field_name}[{index}]", active)
+        finally:
+            active.remove(identity)
+        return
+    raise ValueError(f"{field_name} contains a non-JSON value")
+
+
+def public_evaluation_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return a public, content-bound summary without evaluator-private values."""
+
+    safe_evidence = _require_json_object(evidence, "evaluation evidence.evidence")
+    encoded = json.dumps(
+        safe_evidence,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    summary: dict[str, Any] = {
+        "evidence_sha256": hashlib.sha256(encoded).hexdigest(),
+        "field_count": len(safe_evidence),
+    }
+    exit_code = safe_evidence.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        summary["exit_code"] = exit_code
+    for stream in ("stdout", "stderr"):
+        value = safe_evidence.get(stream)
+        if isinstance(value, str):
+            stream_bytes = value.encode("utf-8")
+            summary[f"{stream}_sha256"] = hashlib.sha256(stream_bytes).hexdigest()
+            summary[f"{stream}_bytes"] = len(stream_bytes)
+    return summary
+
+
+def public_evaluation_result(result: EvaluationEvidence) -> dict[str, Any]:
+    """Serialize verifier evidence for public traces and derived analysis records."""
+
+    evaluator = _require_string(result.evaluator, "evaluation evidence.evaluator")
+    reason_value = _require_string(result.reason, "evaluation evidence.reason")
+    passed = _require_bool(result.passed, "evaluation evidence.passed")
+    infrastructure_failure = _require_bool(
+        result.infrastructure_failure,
+        "evaluation evidence.infrastructure_failure",
+    )
+    score = _require_finite_number(result.score, "evaluation evidence.score")
+    public_evaluator = (
+        evaluator
+        if evaluator in _PUBLIC_EVALUATOR_NAMES
+        else f"custom_evaluator_{hashlib.sha256(evaluator.encode('utf-8')).hexdigest()[:16]}"
+    )
+    reason_bytes = reason_value.encode("utf-8")
+    if infrastructure_failure:
+        reason = "Evaluator infrastructure failure"
+    elif passed:
+        reason = "Evaluator passed"
+    else:
+        reason = "Evaluator failed"
+    return {
+        "evaluator": public_evaluator,
+        "passed": passed,
+        "score": score,
+        "reason": reason,
+        "reason_sha256": hashlib.sha256(reason_bytes).hexdigest(),
+        "evidence": public_evaluation_evidence(result.evidence),
+        "infrastructure_failure": infrastructure_failure,
+    }
 
 
 class DeterministicEvaluator(Protocol):
@@ -102,7 +328,6 @@ class HiddenTestPatchEvaluator:
                     "stdout": _redact_hidden_values(result.stdout, [patch]),
                     "stderr": _redact_hidden_values(result.stderr, [patch]),
                 },
-                infrastructure_failure=result.exit_code != 0,
             )
         except Exception as exc:
             return EvaluationEvidence(
@@ -315,15 +540,12 @@ def finalize_evaluation_trace(
     termination_reason: TerminationReason | None = None,
 ) -> None:
     for result in report.results:
+        public_result = public_evaluation_result(result)
         recorder.record(
             EventType.VERIFICATION_RESULT,
             {
-                "verifier": result.evaluator,
-                "passed": result.passed,
-                "score": result.score,
-                "reason": result.reason,
-                "evidence": result.evidence,
-                "infrastructure_failure": result.infrastructure_failure,
+                "verifier": public_result.pop("evaluator"),
+                **public_result,
             },
         )
     recorder.record(
@@ -345,9 +567,13 @@ def finalize_evaluation_trace(
 
 
 def contamination_findings(trace_path: str | Path, instance: ScenarioInstance) -> list[str]:
-    content = Path(trace_path).read_text(encoding="utf-8")
+    trace = load_trace(trace_path, tolerate_truncated=False)
     candidates = instance.sensitive_strings()
-    return [value for value in candidates if value and value in content]
+    return [
+        value
+        for value in candidates
+        if any(json_payload_contains_string(event.payload, value) for event in trace.events)
+    ]
 
 
 def _metric_safe_name(value: str) -> str:
@@ -402,11 +628,7 @@ def _trace_requirement_satisfied(requirement: str, observable_text: str) -> bool
     path_tokens = re.findall(r"(?:[\w.-]+/)+[\w.-]+", requirement)
     if path_tokens:
         return all(_normalize_observable_text(path) in observable_text for path in path_tokens)
-    words = [
-        word
-        for word in re.findall(r"[a-zA-Z0-9_./-]+", requirement_text)
-        if len(word) > 2
-    ]
+    words = [word for word in re.findall(r"[a-zA-Z0-9_./-]+", requirement_text) if len(word) > 2]
     return bool(words) and all(word in observable_text for word in words)
 
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from easy_agentic_data.traces.events import EventType
-from easy_agentic_data.traces.recorder import Trace, load_trace
+from easy_agentic_data.traces.recorder import Trace, _validate_event_order, load_trace
 
 
 @dataclass
@@ -39,20 +39,34 @@ def replay_trace(trace_or_path: Trace | str | Path) -> ReplayResult:
     """Reconstruct observable session state without invoking a model or tool."""
 
     trace = trace_or_path if isinstance(trace_or_path, Trace) else load_trace(trace_or_path)
+    _validate_event_order(trace.events)
     state = ReplayState(session_id=trace.session_id)
+    seen_message_ids: set[str] = set()
 
     for event in trace.events:
         payload = event.payload
         if event.event_type is EventType.SESSION_STARTED:
             state.scenario_instance_id = payload["scenario_instance_id"]
             state.workspace_state_hash = payload["initial_state_hash"]
+        elif event.event_type is EventType.SYSTEM_MESSAGE:
+            _append_message(
+                state,
+                seen_message_ids,
+                {
+                    "message_id": payload["message_id"],
+                    "role": "system",
+                    "content": payload["content"],
+                },
+            )
         elif event.event_type is EventType.USER_MESSAGE:
-            state.messages.append(
+            _append_message(
+                state,
+                seen_message_ids,
                 {
                     "message_id": payload["message_id"],
                     "role": "user",
                     "content": payload["content"],
-                }
+                },
             )
         elif event.event_type is EventType.MODEL_RESPONSE:
             message = {
@@ -63,7 +77,7 @@ def replay_trace(trace_or_path: Trace | str | Path) -> ReplayResult:
             }
             if payload.get("reasoning_content") is not None:
                 message["reasoning_content"] = payload["reasoning_content"]
-            state.messages.append(message)
+            _append_message(state, seen_message_ids, message)
         elif event.event_type is EventType.TOOL_REQUESTED:
             state.tool_calls[payload["call_id"]] = {
                 "name": payload["name"],
@@ -89,6 +103,21 @@ def replay_trace(trace_or_path: Trace | str | Path) -> ReplayResult:
                     "error": payload.get("error"),
                 }
             )
+        elif event.event_type is EventType.TOOL_MESSAGE:
+            message = {
+                "message_id": payload["message_id"],
+                "role": "tool",
+                "content": payload["content"],
+                "name": payload["name"],
+                "tool_call_id": payload["tool_call_id"],
+            }
+            _append_message(state, seen_message_ids, message)
+            call = state.tool_calls.setdefault(
+                payload["tool_call_id"],
+                {"name": payload["name"]},
+            )
+            call["tool_message_id"] = payload["message_id"]
+            call["tool_message_content"] = payload["content"]
         elif event.event_type is EventType.WORKSPACE_DIFF:
             if (
                 state.workspace_state_hash
@@ -113,3 +142,17 @@ def replay_trace(trace_or_path: Trace | str | Path) -> ReplayResult:
         terminal_state_hash=state.workspace_state_hash,
         state=state,
     )
+
+
+def _append_message(
+    state: ReplayState,
+    seen_message_ids: set[str],
+    message: dict[str, Any],
+) -> None:
+    message_id = message.get("message_id")
+    if not isinstance(message_id, str) or not message_id:
+        raise ValueError("Trace message_id must be a non-empty string")
+    if message_id in seen_message_ids:
+        raise ValueError(f"Duplicate trace message_id: {message_id}")
+    seen_message_ids.add(message_id)
+    state.messages.append(message)

@@ -6,6 +6,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from easy_agentic_data.batch import (
+    ConsumedUsageTotals,
     JsonCallCache,
     PersistentScheduler,
     ResourceGates,
@@ -1174,6 +1175,194 @@ class BatchTests(unittest.TestCase):
         self.assertGreaterEqual(summary["tokens"], 10)
         self.assertLess(summary["processed"], 3)
 
+    def test_scheduler_accumulates_retry_resource_consumption(self) -> None:
+        class MeteredWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, job):
+                del job
+                self.calls += 1
+                if self.calls == 1:
+                    return RolloutOutcome(
+                        infrastructure_failure=True,
+                        tokens=5,
+                        cost=0.25,
+                        metrics={"elapsed_ms": 200.0},
+                        error="temporary",
+                    )
+                return RolloutOutcome(
+                    trace_id="trace_ok",
+                    success=True,
+                    tokens=7,
+                    cost=0.5,
+                    metrics={"elapsed_ms": 300.0},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
+            scheduler.submit([RolloutJob("scenario", 0, "model", "config")])
+            worker = MeteredWorker()
+            scheduler.run(worker, max_retries=1)
+            scheduler.run(worker, max_retries=1)
+            row = scheduler.rows()[0]
+
+        self.assertEqual(row["tokens"], 7)
+        self.assertEqual(row["cost"], 0.5)
+        self.assertEqual(row["consumed_tokens"], 12)
+        self.assertEqual(row["consumed_cost"], 0.75)
+        self.assertEqual(row["consumed_elapsed_ms"], 500.0)
+
+    def test_scheduler_absolute_consumption_is_idempotent_across_retries(self) -> None:
+        class LedgerWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, job):
+                del job
+                self.calls += 1
+                if self.calls <= 2:
+                    return RolloutOutcome(
+                        infrastructure_failure=True,
+                        tokens=5,
+                        cost=0.25,
+                        metrics={"elapsed_ms": 200.0},
+                        error="recoverable",
+                        absolute_consumed_usage=ConsumedUsageTotals(5, 0.25, 200.0),
+                    )
+                return RolloutOutcome(
+                    trace_id="trace_ok",
+                    success=True,
+                    tokens=7,
+                    cost=0.5,
+                    metrics={"elapsed_ms": 300.0},
+                    absolute_consumed_usage=ConsumedUsageTotals(12, 0.75, 500.0),
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
+            scheduler.submit([RolloutJob("scenario", 0, "model", "config")])
+            worker = LedgerWorker()
+            scheduler.run(worker, max_retries=2)
+            scheduler.run(worker, max_retries=2)
+            scheduler.run(worker, max_retries=2)
+            row = scheduler.rows()[0]
+
+        self.assertEqual(worker.calls, 3)
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["tokens"], 7)
+        self.assertEqual(row["consumed_tokens"], 12)
+        self.assertEqual(row["consumed_cost"], 0.75)
+        self.assertEqual(row["consumed_elapsed_ms"], 500.0)
+
+    def test_scheduler_absolute_finish_rejects_accounting_decrease(self) -> None:
+        class DecreasingLedgerWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, job):
+                del job
+                self.calls += 1
+                if self.calls == 1:
+                    return RolloutOutcome(
+                        infrastructure_failure=True,
+                        absolute_consumed_usage=ConsumedUsageTotals(5, 0.25, 200.0),
+                    )
+                return RolloutOutcome(
+                    trace_id="trace_invalid",
+                    absolute_consumed_usage=ConsumedUsageTotals(4, 0.25, 200.0),
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
+            scheduler.submit([RolloutJob("scenario", 0, "model", "config")])
+            worker = DecreasingLedgerWorker()
+            scheduler.run(worker, max_retries=1)
+            with self.assertRaisesRegex(ValueError, "cannot decrease"):
+                scheduler.run(worker, max_retries=1)
+            row = scheduler.rows()[0]
+
+        self.assertEqual(row["consumed_tokens"], 5)
+        self.assertEqual(row["consumed_cost"], 0.25)
+        self.assertEqual(row["consumed_elapsed_ms"], 200.0)
+
+    def test_scheduler_reconciles_absolute_consumption_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
+            jobs = [
+                RolloutJob("scenario_a", 0, "model", "config"),
+                RolloutJob("scenario_b", 0, "model", "config"),
+            ]
+            scheduler.submit(jobs)
+            totals = {
+                jobs[0].job_id: ConsumedUsageTotals(10, 0.5, 100.0),
+                jobs[1].job_id: ConsumedUsageTotals(20, 1.0, 200.0),
+            }
+            scheduler.reconcile_consumed_usage(totals)
+            scheduler.reconcile_consumed_usage(totals)
+            reconciled = {row["job_id"]: row for row in scheduler.rows()}
+
+            with self.assertRaisesRegex(ValueError, "Unknown rollout job IDs"):
+                scheduler.reconcile_consumed_usage(
+                    {
+                        jobs[0].job_id: ConsumedUsageTotals(11, 0.6, 110.0),
+                        "job_unknown": ConsumedUsageTotals(1, 0.1, 10.0),
+                    }
+                )
+            after_unknown = {row["job_id"]: row for row in scheduler.rows()}
+
+            with self.assertRaisesRegex(ValueError, "cannot decrease"):
+                scheduler.reconcile_consumed_usage(
+                    {jobs[0].job_id: ConsumedUsageTotals(9, 0.5, 100.0)}
+                )
+            with self.assertRaisesRegex(ValueError, "must be ConsumedUsageTotals"):
+                scheduler.reconcile_consumed_usage(
+                    {jobs[0].job_id: {"tokens": 10}}  # type: ignore[dict-item]
+                )
+            after_rejections = {row["job_id"]: row for row in scheduler.rows()}
+
+        self.assertEqual(reconciled[jobs[0].job_id]["consumed_tokens"], 10)
+        self.assertEqual(reconciled[jobs[1].job_id]["consumed_tokens"], 20)
+        self.assertEqual(after_unknown[jobs[0].job_id]["consumed_tokens"], 10)
+        self.assertEqual(after_rejections, after_unknown)
+
+    def test_consumed_usage_totals_reject_invalid_values(self) -> None:
+        invalid_values = [
+            {"tokens": -1, "cost": 0.0, "elapsed_ms": 0.0},
+            {"tokens": True, "cost": 0.0, "elapsed_ms": 0.0},
+            {"tokens": 1, "cost": float("nan"), "elapsed_ms": 0.0},
+            {"tokens": 1, "cost": 0.0, "elapsed_ms": float("inf")},
+        ]
+        for values in invalid_values:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                ConsumedUsageTotals(**values)
+
+    def test_scheduler_requires_worst_case_job_budget_reservation(self) -> None:
+        class Worker:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, job):
+                del job
+                self.calls += 1
+                return RolloutOutcome(trace_id="unexpected", tokens=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = PersistentScheduler(Path(directory) / "jobs.sqlite3")
+            scheduler.submit([RolloutJob("scenario", 0, "model", "config")])
+            worker = Worker()
+            summary = scheduler.run(
+                worker,
+                budget=RunBudget(max_tokens=9, max_job_tokens=10),
+            )
+            row = scheduler.rows()[0]
+
+        self.assertEqual(worker.calls, 0)
+        self.assertEqual(summary["processed"], 0)
+        self.assertTrue(summary["budget_exhausted"])
+        self.assertEqual(summary["budget_stop_reasons"], ["job_token_reservation"])
+        self.assertEqual(row["status"], "pending")
+
     def test_exponential_backoff_and_worker_health(self) -> None:
         calls = []
         delays = []
@@ -1287,6 +1476,13 @@ def _write_recoverable_trace(path: Path) -> None:
             },
         },
         {
+            "event_type": "system_message",
+            "payload": {
+                "message_id": "system_0",
+                "content": "You are the recoverable trace test agent.",
+            },
+        },
+        {
             "event_type": "model_response",
             "payload": {
                 "message_id": "assistant_1",
@@ -1297,6 +1493,14 @@ def _write_recoverable_trace(path: Path) -> None:
         {
             "event_type": "tool_requested",
             "payload": {"call_id": "call_1", "name": "run_command", "arguments": {}},
+        },
+        {
+            "event_type": "workspace_diff",
+            "payload": {
+                "before_state_hash": "state_before",
+                "after_state_hash": "state_after",
+                "diff": "candidate patch",
+            },
         },
         {
             "event_type": "verification_result",
@@ -1324,7 +1528,7 @@ def _write_recoverable_trace(path: Path) -> None:
             handle.write(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "session_id": "session_recoverable",
                         "sequence": sequence,
                         **event,

@@ -10,6 +10,7 @@ MAX_LIST_FILES = 500
 MAX_READ_CHARS = 40_000
 MAX_SEARCH_MATCHES = 200
 MAX_SEARCH_LINE_CHARS = 500
+MAX_DIFF_CHARS = 40_000
 
 
 @dataclass
@@ -126,7 +127,12 @@ class CodingToolRuntime:
         if name == "git_status":
             return self.sandbox.execute(["git", "status", "--short"]).__dict__
         if name == "git_diff":
-            return self.sandbox.diff()
+            value = self.sandbox.diff()
+            return {
+                "diff": value[:MAX_DIFF_CHARS],
+                "chars": len(value),
+                "truncated": len(value) > MAX_DIFF_CHARS,
+            }
         if name == "ask_user":
             return {"question": arguments["question"], "awaiting_user": True}
         raise ValueError(f"Unknown coding tool: {name}")

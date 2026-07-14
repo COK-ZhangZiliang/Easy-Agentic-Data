@@ -43,6 +43,9 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertNotIn("EVALUATOR_CANARY_67890", encoded)
         self.assertNotIn("HIDDEN_TEST_PATCH_CANARY", encoded)
         self.assertIn("HIDDEN_TEST_PATCH_CANARY", instance.sensitive_strings())
+        self.assertIn("REQUIRED_STATE_CANARY_24680", instance.sensitive_strings())
+        self.assertIn("FORBIDDEN_STATE_CANARY_13579", instance.sensitive_strings())
+        self.assertIn("NESTED_METADATA_CANARY_11223", instance.sensitive_strings())
 
     def test_environment_metadata_rejects_secret_like_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "secret-like"):
@@ -82,8 +85,18 @@ def _scenario() -> Scenario:
         hidden_evaluator=HiddenEvaluatorContext(
             reference_answer="EVALUATOR_CANARY_67890",
             hidden_tests=["tests/hidden/test_parser.py"],
-            required_state={"tests_pass": True},
-            metadata={"test_patch": "HIDDEN_TEST_PATCH_CANARY"},
+            required_state={
+                "file_contains": {"src/private.py": "REQUIRED_STATE_CANARY_24680"}
+            },
+            forbidden_state={
+                "nested": [{"value": "FORBIDDEN_STATE_CANARY_13579"}]
+            },
+            metadata={
+                "test_patch": "HIDDEN_TEST_PATCH_CANARY",
+                "private": {
+                    "PRIVATE_METADATA_KEY_CANARY": ["NESTED_METADATA_CANARY_11223"]
+                },
+            },
         ),
     )
 

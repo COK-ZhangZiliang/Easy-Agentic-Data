@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
-import tempfile
-from collections.abc import Sequence
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from easy_agentic_data.agent import AgentBudgets, HeadlessAgent
+from easy_agentic_data.agent import AgentBudgets
 from easy_agentic_data.batch import (
     PersistentScheduler,
     RolloutJob,
@@ -24,28 +24,31 @@ from easy_agentic_data.batch import (
     select_scale_candidates,
     selected_job_status,
 )
-from easy_agentic_data.coding_tools import SCHEMAS, CodingToolRuntime
 from easy_agentic_data.config import LLMConfig, load_llm_config
-from easy_agentic_data.evaluation import (
-    EvaluationSuite,
-    ForbiddenStateEvaluator,
-    HiddenCommandEvaluator,
-    HiddenTestPatchEvaluator,
-    RequiredStateEvaluator,
-    TraceRequirementEvaluator,
-    apply_agent_termination,
-    derive_turn_rewards,
-    evaluation_result_metrics,
-    finalize_evaluation_trace,
-)
 from easy_agentic_data.gold20 import freeze_gold20
 from easy_agentic_data.gold20_runtime import replay_gold20_runtime
-from easy_agentic_data.llm.observability import ObservedLLMClient
 from easy_agentic_data.llm.openai_compatible import (
     LocalOpenAICompatibleClient,
     OpenAICompatibleClient,
 )
-from easy_agentic_data.policy import ToolPolicy
+from easy_agentic_data.pilot_artifacts import (
+    build_pilot_quality_report,
+    reproduce_successful_trajectories,
+    write_pilot_exports,
+)
+from easy_agentic_data.pilot_contract import PilotBudgets, PricingSpec
+from easy_agentic_data.pilot_workflow import (
+    PilotRolloutWorker,
+    build_pilot_run_contract,
+    load_pilot_run_contract,
+    reconcile_pilot_usage_ledger,
+    submit_pilot_jobs,
+    validate_pilot_jobs,
+    validate_pilot_runtime,
+    validate_pilot_versions,
+    validate_provider_availability,
+    write_pilot_run_contract,
+)
 from easy_agentic_data.real_seed_sources import (
     DEFAULT_DEMO_IMAGE_DIGEST,
     SWE_BENCH_LITE_DATASET,
@@ -53,7 +56,12 @@ from easy_agentic_data.real_seed_sources import (
 )
 from easy_agentic_data.registry import (
     ScenarioRegistry,
-    materialize_environment_source,
+)
+from easy_agentic_data.registry_rollouts import (
+    RolloutArtifactPaths,
+    deterministic_evaluators,
+    run_registry_rollout,
+    safe_error_message,
 )
 from easy_agentic_data.registry_sources import (
     DEFAULT_TRAIN_LICENSE_ALLOWLIST,
@@ -73,7 +81,7 @@ from easy_agentic_data.repository_synthetic import (
     generate_repository_synthetic_scenarios,
     load_repository_synthesis_specs,
 )
-from easy_agentic_data.sandbox import DockerSandbox, SandboxLimits
+from easy_agentic_data.sandbox import DockerSandbox
 from easy_agentic_data.scenario_decontamination import (
     audit_scenario_decontamination,
     scenarios_from_registry,
@@ -107,7 +115,6 @@ from easy_agentic_data.seed_library import (
     audit_seed_library,
 )
 from easy_agentic_data.seed_review import build_seed_review_queue
-from easy_agentic_data.simulation import RuleBasedUserSimulator, user_callback
 from easy_agentic_data.source_collection import (
     audit_public_source_records,
     build_source_collection_plan,
@@ -123,7 +130,14 @@ from easy_agentic_data.source_collection import (
     summarize_source_collection_shard_status,
 )
 from easy_agentic_data.synthesis_tiers import default_synthesis_tiers, run_complex_synthetic_demo
-from easy_agentic_data.traces import TraceRecorder, load_trace, replay_trace
+from easy_agentic_data.traces import load_trace, replay_trace
+from easy_agentic_data.trajectory_review import (
+    ReviewDecision,
+    build_quarantine_set,
+    build_trajectory_review_queue,
+    summarize_review_gate,
+    validate_review_gate,
+)
 
 
 def build_llm_client(config: LLMConfig):
@@ -855,6 +869,75 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch_readiness.add_argument("--audit", required=True)
     batch_readiness.add_argument("--decision", required=True)
     batch_readiness.add_argument("--output", default="")
+    pilot_parser = subparsers.add_parser("pilot", help="Run the contract-bound Gold-20 pilot")
+    pilot_subparsers = pilot_parser.add_subparsers(dest="pilot_command", required=True)
+    pilot_contract = pilot_subparsers.add_parser("create-contract")
+    pilot_contract.add_argument("--manifest", required=True)
+    pilot_contract.add_argument("--registry", required=True)
+    pilot_contract.add_argument("--config", required=True)
+    pilot_contract.add_argument("--output", required=True)
+    pilot_contract.add_argument("--rollout-seed", action="append", type=int, default=[])
+    pilot_contract.add_argument("--max-agent-turns", type=int, default=20)
+    pilot_contract.add_argument("--max-agent-tool-calls", type=int, default=50)
+    pilot_contract.add_argument("--max-agent-tokens", type=int, default=300_000)
+    pilot_contract.add_argument("--max-agent-seconds", type=float, default=1200.0)
+    pilot_contract.add_argument("--malformed-tool-retries", type=int, default=2)
+    pilot_contract.add_argument("--max-infrastructure-retries", type=int, default=2)
+    pilot_contract.add_argument("--max-workers", type=int, default=1)
+    pilot_contract.add_argument("--max-total-tokens", type=int, default=12_000_000)
+    pilot_contract.add_argument("--max-total-cost-usd", required=True)
+    pilot_contract.add_argument("--max-total-seconds", type=float, default=172_800.0)
+    pilot_contract.add_argument("--input-usd-per-million-tokens", required=True)
+    pilot_contract.add_argument("--cached-input-usd-per-million-tokens", required=True)
+    pilot_contract.add_argument("--output-usd-per-million-tokens", required=True)
+    pilot_enqueue = pilot_subparsers.add_parser("enqueue")
+    pilot_enqueue.add_argument("--contract", required=True)
+    pilot_enqueue.add_argument("--database", required=True)
+    pilot_run = pilot_subparsers.add_parser("run")
+    pilot_run.add_argument("--contract", required=True)
+    pilot_run.add_argument("--registry", required=True)
+    pilot_run.add_argument("--database", required=True)
+    pilot_run.add_argument("--config", required=True)
+    pilot_run.add_argument("--trace-directory", required=True)
+    pilot_run.add_argument("--max-jobs", type=int)
+    pilot_run.add_argument("--dry-run", action="store_true")
+    pilot_reproduce = pilot_subparsers.add_parser("reproduce")
+    pilot_reproduce.add_argument("--contract", required=True)
+    pilot_reproduce.add_argument("--registry", required=True)
+    pilot_reproduce.add_argument("--database", required=True)
+    pilot_reproduce.add_argument("--trace-directory", required=True)
+    pilot_reproduce.add_argument("--output", required=True)
+    pilot_export = pilot_subparsers.add_parser("export")
+    pilot_export.add_argument("--contract", required=True)
+    pilot_export.add_argument("--registry", required=True)
+    pilot_export.add_argument("--database", required=True)
+    pilot_export.add_argument("--trace-directory", required=True)
+    pilot_export.add_argument("--reproduction", required=True)
+    pilot_export.add_argument("--review-queue", required=True)
+    pilot_export.add_argument("--review-gate", required=True)
+    pilot_export.add_argument("--quarantine", required=True)
+    pilot_export.add_argument("--output-directory", required=True)
+    pilot_quality = pilot_subparsers.add_parser("quality-report")
+    pilot_quality.add_argument("--contract", required=True)
+    pilot_quality.add_argument("--registry", required=True)
+    pilot_quality.add_argument("--database", required=True)
+    pilot_quality.add_argument("--trace-directory", required=True)
+    pilot_quality.add_argument("--reproduction", default="")
+    pilot_quality.add_argument("--export-manifest", default="")
+    pilot_quality.add_argument("--review-gate", default="")
+    pilot_quality.add_argument("--output", required=True)
+    pilot_review_queue = pilot_subparsers.add_parser("review-queue")
+    pilot_review_queue.add_argument("--contract", required=True)
+    pilot_review_queue.add_argument("--registry", required=True)
+    pilot_review_queue.add_argument("--quality-report", required=True)
+    pilot_review_queue.add_argument("--output", required=True)
+    pilot_review_gate = pilot_subparsers.add_parser("review-gate")
+    pilot_review_gate.add_argument("--contract", required=True)
+    pilot_review_gate.add_argument("--registry", required=True)
+    pilot_review_gate.add_argument("--queue", required=True)
+    pilot_review_gate.add_argument("--decisions", required=True)
+    pilot_review_gate.add_argument("--output", required=True)
+    pilot_review_gate.add_argument("--quarantine-output", default="")
     args = parser.parse_args(argv)
 
     if args.command == "synthesis":
@@ -1810,6 +1893,240 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(asdict(outcome), indent=2))
         return 0 if outcome.trace_id else 1
+    if args.command == "pilot":
+        if args.pilot_command == "create-contract":
+            contract = build_pilot_run_contract(
+                args.manifest,
+                ScenarioRegistry(args.registry),
+                load_llm_config(args.config),
+                budgets=PilotBudgets(
+                    max_agent_turns=args.max_agent_turns,
+                    max_agent_tool_calls=args.max_agent_tool_calls,
+                    max_agent_tokens=args.max_agent_tokens,
+                    max_agent_seconds=args.max_agent_seconds,
+                    max_total_tokens=args.max_total_tokens,
+                    max_total_cost_usd=args.max_total_cost_usd,
+                    max_total_seconds=args.max_total_seconds,
+                    malformed_tool_retries=args.malformed_tool_retries,
+                    max_infrastructure_retries=args.max_infrastructure_retries,
+                    max_workers=args.max_workers,
+                ),
+                pricing=PricingSpec(
+                    input_usd_per_million_tokens=args.input_usd_per_million_tokens,
+                    cached_input_usd_per_million_tokens=(
+                        args.cached_input_usd_per_million_tokens
+                    ),
+                    output_usd_per_million_tokens=args.output_usd_per_million_tokens,
+                ),
+                rollout_seeds=tuple(args.rollout_seed or [0, 1]),
+            )
+            write_pilot_run_contract(args.output, contract)
+            print(json.dumps(contract.to_dict(), indent=2, sort_keys=True))
+            return 0
+        contract = load_pilot_run_contract(args.contract)
+        if args.pilot_command == "enqueue":
+            scheduler = PersistentScheduler(args.database)
+            job_ids = submit_pilot_jobs(scheduler, contract)
+            payload = {
+                "contract_id": contract.contract_id,
+                "submitted_job_count": len(job_ids),
+                "status_counts": scheduler.status_counts(),
+            }
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        registry = ScenarioRegistry(args.registry)
+        if args.pilot_command != "run":
+            validate_pilot_versions(contract, registry)
+        if args.pilot_command == "review-queue":
+            quality = _load_json_object(args.quality_report)
+            if quality.get("contract_id") != contract.contract_id:
+                raise ValueError("Quality report contract binding mismatch")
+            summaries = quality.get("review_summaries")
+            if not isinstance(summaries, list):
+                raise ValueError("Quality report review_summaries must be a list")
+            queue = build_trajectory_review_queue(summaries)
+            if queue.get("contract_id") != contract.contract_id:
+                raise ValueError("Review queue contract binding mismatch")
+            _write_json_object(args.output, queue)
+            print(json.dumps(queue, indent=2, sort_keys=True))
+            return 0
+        if args.pilot_command == "review-gate":
+            queue = _load_json_object(args.queue)
+            if queue.get("contract_id") != contract.contract_id:
+                raise ValueError("Review queue contract binding mismatch")
+            decisions = [
+                ReviewDecision.from_dict(value)
+                for value in _load_json_or_jsonl_objects(args.decisions)
+            ]
+            gate = summarize_review_gate(queue, decisions)
+            _write_json_object(args.output, gate)
+            if args.quarantine_output:
+                _write_json_object(
+                    args.quarantine_output,
+                    build_quarantine_set(queue, decisions),
+                )
+            print(json.dumps(gate, indent=2, sort_keys=True))
+            return 0 if gate["passed"] else 2
+        scheduler = PersistentScheduler(args.database)
+        rows = validate_pilot_jobs(scheduler, contract)
+        if args.pilot_command == "run":
+            config = load_llm_config(args.config)
+            validate_pilot_runtime(contract, registry, config)
+            worker = PilotRolloutWorker(
+                registry,
+                config,
+                args.trace_directory,
+                contract,
+            )
+            usage_ledger = reconcile_pilot_usage_ledger(
+                scheduler,
+                contract,
+                worker,
+            )
+            rows = validate_pilot_jobs(scheduler, contract)
+            plan = planned_batch_run(rows, max_jobs=args.max_jobs)
+            if args.dry_run:
+                print(
+                    json.dumps(
+                        {
+                            "dry_run": True,
+                            "contract_id": contract.contract_id,
+                            "budgets": contract.budgets.to_dict(),
+                            "usage_ledger": usage_ledger,
+                            **plan,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            validate_provider_availability(config)
+            used_tokens = sum(
+                int(row.get("consumed_tokens", row.get("tokens", 0)) or 0)
+                for row in rows
+            )
+            used_cost = sum(
+                float(row.get("consumed_cost", row.get("cost", 0.0)) or 0.0)
+                for row in rows
+            )
+            used_seconds = sum(
+                float(row.get("consumed_elapsed_ms", 0.0) or 0.0) / 1000
+                for row in rows
+            )
+            remaining_tokens = contract.budgets.max_total_tokens - used_tokens
+            remaining_cost = float(contract.budgets.max_total_cost_usd) - used_cost
+            remaining_seconds = contract.budgets.max_total_seconds - used_seconds
+            if plan["runnable_job_count"] and (
+                remaining_tokens <= 0 or remaining_cost <= 0 or remaining_seconds <= 0
+            ):
+                raise RuntimeError("Pilot time, token, or cost budget is exhausted")
+            maximum_token_rate = max(
+                contract.pricing.input_usd_per_million_tokens,
+                contract.pricing.cached_input_usd_per_million_tokens,
+                contract.pricing.output_usd_per_million_tokens,
+            )
+            maximum_job_cost = float(
+                contract.budgets.max_agent_tokens * maximum_token_rate / 1_000_000
+            )
+            if plan["runnable_job_count"] and (
+                remaining_tokens < contract.budgets.max_agent_tokens
+                or remaining_cost < maximum_job_cost
+                or remaining_seconds < contract.budgets.max_agent_seconds
+            ):
+                raise RuntimeError(
+                    "Remaining pilot budget cannot safely admit another rollout"
+                )
+            summary = scheduler.run(
+                worker,
+                max_workers=contract.budgets.max_workers,
+                max_retries=contract.budgets.max_infrastructure_retries,
+                budget=RunBudget(
+                    max_seconds=remaining_seconds,
+                    max_tokens=remaining_tokens,
+                    max_cost=remaining_cost,
+                    max_job_seconds=contract.budgets.max_agent_seconds,
+                    max_job_tokens=contract.budgets.max_agent_tokens,
+                    max_job_cost=maximum_job_cost,
+                ),
+                max_jobs=args.max_jobs,
+            )
+            summary["usage_ledger"] = reconcile_pilot_usage_ledger(
+                scheduler,
+                contract,
+                worker,
+            )
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return 0
+        if args.pilot_command == "reproduce":
+            result = reproduce_successful_trajectories(
+                contract,
+                registry,
+                rows,
+                args.trace_directory,
+                args.output,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["all_successes_reproduced"] else 2
+        if args.pilot_command == "export":
+            reproduction = _load_json_object(args.reproduction)
+            review_queue = _load_json_object(args.review_queue)
+            if review_queue.get("contract_id") != contract.contract_id:
+                raise ValueError("Review queue contract binding mismatch")
+            validated_review = validate_review_gate(
+                review_queue,
+                _load_json_object(args.review_gate),
+            )
+            quarantine = _load_json_object(args.quarantine)
+            decisions = [
+                ReviewDecision.from_dict(value)
+                for value in validated_review["decisions"]
+            ]
+            expected_quarantine = build_quarantine_set(review_queue, decisions)
+            if quarantine != expected_quarantine:
+                raise ValueError("Quarantine artifact does not match the validated review gate")
+            quarantine_ids = expected_quarantine["trace_ids"]
+            result = write_pilot_exports(
+                contract,
+                registry,
+                rows,
+                args.trace_directory,
+                args.output_directory,
+                reproduction=reproduction,
+                private_reproduction_directory=(
+                    Path(args.reproduction).parent / "private-reproductions"
+                ),
+                quarantined_trace_ids=quarantine_ids,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if args.pilot_command == "quality-report":
+            result = build_pilot_quality_report(
+                contract,
+                registry,
+                rows,
+                args.trace_directory,
+                reproduction=(
+                    _load_json_object(args.reproduction) if args.reproduction else None
+                ),
+                private_reproduction_directory=(
+                    Path(args.reproduction).parent / "private-reproductions"
+                    if args.reproduction
+                    else None
+                ),
+                export_manifest=(
+                    _load_json_object(args.export_manifest) if args.export_manifest else None
+                ),
+                export_directory=(
+                    Path(args.export_manifest).parent if args.export_manifest else None
+                ),
+                review_gate=(
+                    _load_json_object(args.review_gate) if args.review_gate else None
+                ),
+            )
+            _write_json_object(args.output, result)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["passed"] else 2
+        return 1
     if args.command == "batch":
         scheduler = PersistentScheduler(args.database) if hasattr(args, "database") else None
         if args.batch_command == "enqueue":
@@ -2035,6 +2352,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 1
 
 
+def _load_json_object(path: str | Path) -> dict[str, object]:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object: {path}")
+    return value
+
+
+def _load_json_or_jsonl_objects(path: str | Path) -> list[dict[str, object]]:
+    content = Path(path).read_text(encoding="utf-8")
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        value = [json.loads(line) for line in content.splitlines() if line.strip()]
+    if isinstance(value, dict) and isinstance(value.get("decisions"), list):
+        value = value["decisions"]
+    elif isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError("Expected a JSON array, decisions object, or JSONL objects")
+    return value
+
+
+def _write_json_object(path: str | Path, value: Mapping[str, object]) -> None:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _review_sample_rows(
     rows: Sequence[dict[str, object]],
     *,
@@ -2148,7 +2493,15 @@ class _CLIRolloutWorker:
     def run(self, job: RolloutJob) -> RolloutOutcome:
         trace_path = self.trace_directory / f"{job.job_id}.jsonl"
         if trace_path.exists():
-            return _rollout_outcome_from_existing_trace(trace_path)
+            try:
+                outcome = _rollout_outcome_from_existing_trace(trace_path)
+            except Exception:
+                outcome = RolloutOutcome(infrastructure_failure=True)
+            if not outcome.infrastructure_failure:
+                return outcome
+            attempt_root = trace_path.parent / ".attempts" / trace_path.stem
+            attempt_root.mkdir(parents=True, exist_ok=True)
+            trace_path.replace(attempt_root / f"recovered-{time.time_ns()}.jsonl.partial")
         try:
             return _run_registry_scenario(
                 self.registry,
@@ -2161,7 +2514,7 @@ class _CLIRolloutWorker:
         except Exception as exc:
             return RolloutOutcome(
                 infrastructure_failure=True,
-                error=f"{type(exc).__name__}: {exc}",
+                error=safe_error_message(exc),
             )
 
 
@@ -2172,7 +2525,9 @@ def _rollout_outcome_from_existing_trace(trace_path: Path) -> RolloutOutcome:
             infrastructure_failure=True,
             error=f"Incomplete existing trace: {trace_path}",
         )
+    replay_trace(trace)
     success = False
+    infrastructure_failure = False
     tokens = 0
     tool_calls = 0
     metrics: dict[str, float] = {}
@@ -2190,8 +2545,14 @@ def _rollout_outcome_from_existing_trace(trace_path: Path) -> RolloutOutcome:
                 metrics[f"verifier_{verifier}_passed"] = (
                     1.0 if bool(payload.get("passed", False)) else 0.0
                 )
+            infrastructure_failure = infrastructure_failure or bool(
+                payload.get("infrastructure_failure", False)
+            )
         elif event.event_type.value == "session_finished":
             success = bool(payload.get("success", False))
+            infrastructure_failure = infrastructure_failure or (
+                payload.get("termination_reason") == "infrastructure_failure"
+            )
     non_agent_verifiers = [
         value
         for key, value in metrics.items()
@@ -2202,10 +2563,19 @@ def _rollout_outcome_from_existing_trace(trace_path: Path) -> RolloutOutcome:
     )
     metrics["tool_calls"] = float(tool_calls)
     metrics["tokens"] = float(tokens)
+    cost = 0.0
+    evidence_path = RolloutArtifactPaths.for_trace(trace_path).run_evidence
+    if evidence_path.exists():
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        value = evidence.get("cost", 0.0)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            cost = float(value)
     return RolloutOutcome(
         trace_id=trace.trace_id,
         success=success,
+        infrastructure_failure=infrastructure_failure,
         tokens=tokens,
+        cost=cost,
         metrics=metrics,
     )
 
@@ -2218,111 +2588,27 @@ def _run_registry_scenario(
     random_seed: int,
     budgets: AgentBudgets | None = None,
 ) -> RolloutOutcome:
-    scenario = registry.get_scenario(scenario_id)
-    with tempfile.TemporaryDirectory() as directory:
-        source = materialize_environment_source(
-            scenario.environment,
-            directory,
-            run_health_checks=False,
-        )
-        limits = SandboxLimits(**scenario.environment.resource_limits)
-        sandbox = DockerSandbox(
-            image_digest=scenario.environment.image_digest,
-            source_directory=source,
-            limits=limits,
-            network_enabled=scenario.environment.network_policy != "disabled",
-        )
-        sandbox.create()
-        try:
-            _run_setup_commands(sandbox, scenario.environment.setup_commands)
-            _run_health_check_commands(sandbox, scenario.environment.health_check)
-            instance = registry.materialize(
-                scenario_id,
-                random_seed=random_seed,
-                initial_state_hash=sandbox.state_hash(),
-            )
-            policy = ToolPolicy(
-                scenario.environment.capability_packs or SCHEMAS.keys(),
-                network_enabled=scenario.environment.network_policy != "disabled",
-            )
-            tools = CodingToolRuntime(sandbox, policy)
-            user = RuleBasedUserSimulator(instance)
-            client = ObservedLLMClient(build_llm_client(config))
-            trace_path.parent.mkdir(parents=True, exist_ok=True)
-            with TraceRecorder(
-                trace_path,
-                session_id=f"session_{instance.instance_id}_{random_seed}",
-                scenario_instance=instance,
-            ) as recorder:
-                run_result = HeadlessAgent(client, tools, budgets=budgets).run(
-                    instance,
-                    recorder,
-                    ask_user=user_callback(user, instance),
-                    finalize=False,
-                )
-                trace = load_trace(trace_path)
-                evaluators = _deterministic_evaluators(instance, trace)
-                turn_rewards = derive_turn_rewards(trace, instance)
-                diagnostics = {
-                    "turns": float(run_result.turns),
-                    "tool_calls": float(run_result.tool_calls),
-                    "tokens": float(run_result.tokens),
-                    "user_turns": float(user.metrics.turns),
-                }
-                diagnostics.update(
-                    {
-                        key: float(value)
-                        for key, value in user.metrics.to_dict().items()
-                        if isinstance(value, (int, float))
-                    }
-                )
-                report = EvaluationSuite(evaluators).evaluate(
-                    sandbox,
-                    instance,
-                    diagnostics=diagnostics,
-                    turn_rewards=turn_rewards,
-                )
-                report = apply_agent_termination(report, run_result.termination_reason)
-                finalize_evaluation_trace(
-                    recorder,
-                    report,
-                    final_state_hash=sandbox.state_hash(),
-                    termination_reason=run_result.termination_reason,
-                )
-            trace = load_trace(trace_path)
-            return RolloutOutcome(
-                trace_id=trace.trace_id,
-                success=report.success,
-                tokens=run_result.tokens,
-                metrics={**report.metrics, **evaluation_result_metrics(report)},
-            )
-        finally:
-            sandbox.destroy()
+    result = run_registry_rollout(
+        registry,
+        scenario_id,
+        config,
+        trace_path,
+        random_seed,
+        budgets,
+        client_builder=build_llm_client,
+    )
+    return RolloutOutcome(
+        trace_id=result.trace.trace_id,
+        success=result.report.success,
+        infrastructure_failure=result.report.infrastructure_failure,
+        tokens=result.run_result.tokens,
+        cost=result.cost,
+        metrics=result.metrics,
+    )
 
 
 def _deterministic_evaluators(instance, trace=None):
-    evaluators = []
-    if instance.hidden_evaluator.metadata.get("test_patch"):
-        evaluators.append(HiddenTestPatchEvaluator())
-    evaluators.extend(
-        HiddenCommandEvaluator(shlex.split(command))
-        for command in instance.hidden_evaluator.hidden_tests
-    )
-    if instance.hidden_evaluator.required_state:
-        evaluators.append(RequiredStateEvaluator())
-    if instance.hidden_evaluator.forbidden_state:
-        evaluators.append(ForbiddenStateEvaluator())
-    retrieval_requirements = instance.hidden_evaluator.metadata.get("retrieval_requirements", [])
-    trace_quality_rubric = instance.hidden_evaluator.metadata.get("trace_quality_rubric", [])
-    if retrieval_requirements or trace_quality_rubric:
-        evaluators.append(
-            TraceRequirementEvaluator(
-                trace,
-                retrieval_requirements=retrieval_requirements,
-                trace_quality_rubric=trace_quality_rubric,
-            )
-        )
-    return evaluators
+    return deterministic_evaluators(instance, trace)
 
 
 def _run_setup_commands(sandbox: DockerSandbox, commands: Sequence[str]) -> None:

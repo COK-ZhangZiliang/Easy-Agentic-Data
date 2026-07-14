@@ -37,6 +37,7 @@ class DockerSandbox:
         self.network_enabled = network_enabled
         self.container_name = ""
         self.volume_name = ""
+        self.baseline_commit = ""
 
     def create(self) -> None:
         if shutil.which("docker") is None:
@@ -180,17 +181,100 @@ class DockerSandbox:
         result = self.execute(["find", path, "-type", "f", "-print"])
         return sorted(line.removeprefix("./") for line in result.stdout.splitlines())
 
+    def prepare_git_baseline(self) -> str:
+        """Freeze the post-setup workspace so later diffs include every candidate change."""
+
+        commands = [
+            ["git", "init", "-q"],
+            ["git", "config", "user.name", "Easy Agentic Data"],
+            ["git", "config", "user.email", "ead@example.invalid"],
+            ["git", "add", "--all", "--force"],
+            ["git", "commit", "--allow-empty", "-qm", "ead-baseline"],
+        ]
+        for command in commands:
+            result = self.execute(command)
+            _require_success(result, command)
+        revision = ["git", "rev-parse", "HEAD"]
+        result = self.execute(revision)
+        _require_success(result, revision)
+        self.baseline_commit = result.stdout.strip()
+        if not self.baseline_commit:
+            raise RuntimeError("Git baseline commit could not be resolved")
+        return self.state_hash()
+
+    def candidate_patch(self) -> str:
+        """Return a binary-capable patch including tracked, deleted, and new files."""
+
+        intent = ["git", "add", "--intent-to-add", "--all", "--force"]
+        _require_success(self.execute(intent), intent)
+        baseline = self.baseline_commit or "HEAD"
+        if self.container_name:
+            output_path = "/tmp/ead-candidate.patch"
+            command = [
+                "git",
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                f"--output={output_path}",
+                baseline,
+                "--",
+            ]
+            try:
+                result = self.execute(command)
+                _require_success(result, command)
+                completed = self._run_host(
+                    ["docker", "exec", self.container_name, "cat", output_path]
+                )
+                return completed.stdout
+            finally:
+                self.execute(["rm", "-f", output_path])
+        command = ["git", "diff", "--binary", "--no-ext-diff", baseline, "--"]
+        result = self.execute(command)
+        _require_success(result, command)
+        if result.truncated:
+            raise RuntimeError("Candidate patch output was truncated")
+        return result.stdout
+
+    def apply_candidate_patch(self, patch: str) -> str:
+        """Apply an agent patch to a clean baseline and return the candidate state hash."""
+
+        if not patch:
+            return self.state_hash()
+        patch_hash = hashlib.sha256(patch.encode("utf-8")).hexdigest()[:16]
+        patch_path = f".ead_candidate_{patch_hash}.patch"
+        self.write(patch_path, patch)
+        try:
+            check = ["git", "apply", "--check", "--binary", patch_path]
+            _require_success(self.execute(check), check)
+            apply = ["git", "apply", "--binary", patch_path]
+            _require_success(self.execute(apply), apply)
+        finally:
+            self.execute(["rm", "-f", patch_path])
+        return self.state_hash()
+
     def diff(self) -> str:
-        return self.execute(["git", "diff", "--no-ext-diff"]).stdout
+        return self.candidate_patch()
 
     def state_hash(self) -> str:
         result = self.execute(
             [
                 "sh",
                 "-lc",
-                ("find . -path './.git' -prune -o -type f -print0 | sort -z | xargs -0 sha256sum"),
+                (
+                    "set -e; "
+                    "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+                    "index=/tmp/ead-state-index-$$; rm -f \"$index\"; "
+                    "trap 'rm -f \"$index\"' EXIT; "
+                    "GIT_INDEX_FILE=\"$index\" git add --all --force >/dev/null; "
+                    "GIT_INDEX_FILE=\"$index\" git write-tree; "
+                    "else "
+                    "find . -path './.git' -prune -o -type f -print0 "
+                    "| sort -z | xargs -0 sha256sum; "
+                    "fi"
+                ),
             ]
         )
+        _require_success(result, ["workspace-state-hash"])
         return hashlib.sha256(result.stdout.encode()).hexdigest()
 
     def snapshot(self) -> str:
@@ -234,3 +318,12 @@ def _bounded(value: str, limit: int) -> tuple[str, bool]:
     if len(encoded) <= limit:
         return value, False
     return encoded[:limit].decode("utf-8", errors="replace"), True
+
+
+def _require_success(result: CommandResult, command: list[str]) -> None:
+    if result.exit_code == 0:
+        return
+    detail = (result.stderr or result.stdout).strip()
+    raise RuntimeError(
+        f"Sandbox command failed (exit={result.exit_code}, command={command!r}): {detail}"
+    )

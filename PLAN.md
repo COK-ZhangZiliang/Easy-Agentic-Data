@@ -35,8 +35,9 @@ Useful corpus evidence already produced in the current workspace:
   byte-verified private reference repairs through the production Docker sandbox; zero evaluator
   leaks, infrastructure failures, or unresolved contamination.
 
-This is not a production dataset. The registry-backed execution path still needs direct derived
-export wiring, measured real-model trajectories, human review, and an immutable release manifest.
+M2's contract-bound rollout, clean-reset reproduction, export, review, quarantine, and quality-gate
+infrastructure is implemented and tested. M2 evidence remains absent: no frozen real-provider
+contract has produced 40 canonical traces and 20 human-authored decisions.
 
 ## M0: One Canonical Pipeline
 
@@ -97,10 +98,12 @@ The previous 100-task curation queue remains an optional candidate pool. Complet
 
 **Goal:** prove the complete data path with two independent rollouts for each Gold-20 seed.
 
+**Status:** Infrastructure implemented; measured provider and human-review evidence pending.
+
 Tasks:
 
-- [ ] Persist SFT, preference, RL, and analysis exports directly from registry-backed evaluated
-  traces instead of requiring a separate demo path.
+- [x] Implement a fail-closed run contract, isolated registry rollouts, clean-reset verification,
+  reproduction, direct exports, stratified review, quarantine, and cross-artifact quality gates.
 - [ ] Run two rollouts per Gold-20 seed with one declared provider configuration and fixed budgets.
 - [ ] Replay every trace and rerun successful outcomes from a clean workspace reset.
 - [ ] Generate a quality report covering success, infrastructure failures, tool use, termination,
@@ -149,5 +152,7 @@ Exit gate:
 
 ## Immediate Sequence
 
-1. Wire registry-backed trace exports and run the 40-trajectory pilot.
-2. Decide Dataset v1 scope from measured pilot evidence.
+1. Freeze the provider, price, budget, implementation, and Gold-20 schedule; run 40 trajectories.
+2. Reproduce successes, build the review queue, collect 20 human decisions, quarantine findings,
+   generate exports, and require the final quality report to pass every M2 gate.
+3. Decide Dataset v1 scope from measured pilot evidence.

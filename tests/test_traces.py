@@ -18,6 +18,9 @@ from easy_agentic_data.traces import (
     load_trace,
     replay_trace,
 )
+from easy_agentic_data.traces.events import TRACE_SCHEMA_VERSION
+
+SYSTEM_PROMPT = "You are the trace-contract test agent."
 
 
 class TraceContractTests(unittest.TestCase):
@@ -40,7 +43,13 @@ class TraceContractTests(unittest.TestCase):
             self.assertEqual(result.state.termination_reason, TerminationReason.SUCCESS.value)
             self.assertTrue(result.state.success)
             self.assertEqual(result.state.tool_calls["call_1"]["status"], "completed")
-            self.assertEqual(result.event_count, 10)
+            self.assertEqual(
+                [message["role"] for message in result.state.messages],
+                ["system", "user", "assistant", "tool"],
+            )
+            self.assertEqual(result.state.messages[0]["content"], SYSTEM_PROMPT)
+            self.assertEqual(result.state.messages[-1]["tool_call_id"], "call_1")
+            self.assertEqual(result.event_count, 12)
             self.assertEqual(trace.trace_id, loaded_again.trace_id)
             self.assertEqual(artifacts.read_text(stdout), "1 test passed\n")
 
@@ -49,7 +58,7 @@ class TraceContractTests(unittest.TestCase):
             path = Path(directory) / "truncated.jsonl"
             instance = _instance()
             with TraceRecorder(path, session_id="session_truncated") as recorder:
-                recorder.start(instance)
+                recorder.start(instance, system_prompt=SYSTEM_PROMPT)
                 recorder.record(
                     EventType.USER_MESSAGE,
                     {"message_id": "user_1", "content": instance.public_task.query},
@@ -60,7 +69,7 @@ class TraceContractTests(unittest.TestCase):
             trace = load_trace(path)
 
             self.assertTrue(trace.truncated)
-            self.assertEqual(len(trace.events), 2)
+            self.assertEqual(len(trace.events), 3)
             with self.assertRaisesRegex(ValueError, "Invalid trace JSONL"):
                 load_trace(path, tolerate_truncated=False)
 
@@ -82,6 +91,46 @@ class TraceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported trace schema version 99"):
                 load_trace(path)
 
+    def test_trace_v2_binds_system_message_and_rejects_legacy_v1(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "v2.jsonl"
+            instance = _instance()
+            with TraceRecorder(path, session_id="session_v2") as recorder:
+                recorder.start(instance, system_prompt=SYSTEM_PROMPT)
+            trace = load_trace(path)
+            raw_events = [
+                json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+
+            self.assertEqual(TRACE_SCHEMA_VERSION, 2)
+            self.assertTrue(all(item["schema_version"] == 2 for item in raw_events))
+            self.assertEqual(trace.events[1].event_type, EventType.SYSTEM_MESSAGE)
+            self.assertEqual(trace.events[1].payload["content"], SYSTEM_PROMPT)
+
+            raw_events[0]["schema_version"] = 1
+            path_v1 = Path(directory) / "legacy-v1.jsonl"
+            path_v1.write_text(json.dumps(raw_events[0]) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Unsupported trace schema version 1"):
+                load_trace(path_v1)
+
+    def test_loader_rejects_event_id_that_does_not_match_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tampered.jsonl"
+            event = TraceEvent(
+                session_id="session_tampered",
+                sequence=0,
+                event_type=EventType.SESSION_STARTED,
+                payload={
+                    "scenario_instance_id": "instance_original",
+                    "initial_state_hash": "state_initial",
+                },
+            ).to_dict()
+            event["payload"]["scenario_instance_id"] = "instance_tampered"
+            path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "event_id does not match"):
+                load_trace(path)
+
     def test_recorder_rejects_hidden_context_leak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "leak.jsonl"
@@ -91,7 +140,7 @@ class TraceContractTests(unittest.TestCase):
                 session_id="session_leak",
                 scenario_instance=instance,
             ) as recorder:
-                recorder.start(instance)
+                recorder.start(instance, system_prompt=SYSTEM_PROMPT)
                 with self.assertRaisesRegex(ValueError, "hidden context"):
                     recorder.record(
                         EventType.USER_MESSAGE,
@@ -100,9 +149,17 @@ class TraceContractTests(unittest.TestCase):
                             "content": "Leaked USER_CANARY_12345",
                         },
                     )
+                with self.assertRaisesRegex(ValueError, "hidden context"):
+                    recorder.record(
+                        EventType.USER_MESSAGE,
+                        {
+                            "message_id": "user_3",
+                            "content": "Leaked REQUIRED_STATE_CANARY_24680",
+                        },
+                    )
 
             trace = load_trace(path)
-            self.assertEqual(len(trace.events), 1)
+            self.assertEqual(len(trace.events), 2)
 
     def test_event_schema_rejects_hidden_context_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "hidden field: hidden_tests"):
@@ -114,6 +171,183 @@ class TraceContractTests(unittest.TestCase):
                     "scenario_instance_id": "instance_hidden_field",
                     "initial_state_hash": "state_initial",
                     "metadata": {"hidden_tests": ["do-not-expose"]},
+                },
+            )
+
+        for field_name in (
+            "test_patch",
+            "reference_artifacts",
+            "required_state",
+            "forbidden_state",
+            "rubric",
+            "trace_quality_rubric",
+            "evaluator_payload",
+            "Evaluation-Payload",
+        ):
+            with self.subTest(field_name=field_name), self.assertRaisesRegex(
+                ValueError, "hidden field"
+            ):
+                TraceEvent(
+                    session_id="session_private_field",
+                    sequence=0,
+                    event_type=EventType.SESSION_STARTED,
+                    payload={
+                        "scenario_instance_id": "instance_private_field",
+                        "initial_state_hash": "state_initial",
+                        "metadata": {field_name: "private evaluator material"},
+                    },
+                )
+
+        public_projection = TraceEvent(
+            session_id="session_public_projection",
+            sequence=0,
+            event_type=EventType.VERIFICATION_RESULT,
+            payload={
+                "verifier": "required_state",
+                "passed": True,
+                "score": 1.0,
+                "reason": "Evaluator passed",
+                "evidence": {"evidence_sha256": "0" * 64, "field_count": 1},
+            },
+        )
+        self.assertEqual(public_projection.payload["verifier"], "required_state")
+
+    def test_tool_message_causality_fails_closed(self) -> None:
+        tool_call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        model = (
+            EventType.MODEL_RESPONSE,
+            {"message_id": "assistant_0", "content": None, "tool_calls": [tool_call]},
+        )
+        tool = (
+            EventType.TOOL_MESSAGE,
+            {
+                "message_id": "tool_0",
+                "name": "read_file",
+                "tool_call_id": "call_1",
+                "content": "{}",
+            },
+        )
+        finish = (
+            EventType.SESSION_FINISHED,
+            {
+                "termination_reason": TerminationReason.AGENT_STOP.value,
+                "final_state_hash": "state_initial",
+                "success": False,
+            },
+        )
+        cases = {
+            "orphan": (
+                [tool],
+                "Orphan tool_message",
+            ),
+            "duplicate result": (
+                [model, tool, tool],
+                "Duplicate tool_message",
+            ),
+            "name mismatch": (
+                [
+                    model,
+                    (
+                        EventType.TOOL_MESSAGE,
+                        {
+                            "message_id": "tool_0",
+                            "name": "run_command",
+                            "tool_call_id": "call_1",
+                            "content": "{}",
+                        },
+                    ),
+                ],
+                "name does not match",
+            ),
+            "missing result": (
+                [model, finish],
+                "session_finished cannot occur",
+            ),
+            "next model before result": (
+                [
+                    model,
+                    (
+                        EventType.MODEL_RESPONSE,
+                        {"message_id": "assistant_1", "content": "done", "tool_calls": []},
+                    ),
+                ],
+                "model_response cannot occur",
+            ),
+            "reused assistant call id": (
+                [
+                    model,
+                    tool,
+                    (
+                        EventType.MODEL_RESPONSE,
+                        {
+                            "message_id": "assistant_1",
+                            "content": None,
+                            "tool_calls": [tool_call],
+                        },
+                    ),
+                ],
+                "Duplicate assistant tool call id",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for case_name, (events, expected_error) in cases.items():
+                with self.subTest(case_name=case_name):
+                    path = Path(directory) / f"{case_name.replace(' ', '-')}.jsonl"
+                    with TraceRecorder(path, session_id=f"session_{case_name}") as recorder:
+                        recorder.start(_instance(), system_prompt=SYSTEM_PROMPT)
+                        for event_type, payload in events:
+                            recorder.record(event_type, payload)
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        load_trace(path, tolerate_truncated=False)
+
+    def test_duplicate_ids_inside_one_assistant_message_are_rejected(self) -> None:
+        call = {
+            "id": "call_duplicate",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with TraceRecorder(
+                Path(directory) / "duplicate-call.jsonl",
+                session_id="session_duplicate_call",
+            ) as recorder:
+                recorder.start(_instance(), system_prompt=SYSTEM_PROMPT)
+                with self.assertRaisesRegex(ValueError, "Duplicate assistant tool call id"):
+                    recorder.record(
+                        EventType.MODEL_RESPONSE,
+                        {
+                            "message_id": "assistant_0",
+                            "content": None,
+                            "tool_calls": [call, call],
+                        },
+                    )
+
+    def test_tool_message_schema_requires_complete_string_payload(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Missing payload fields.*name"):
+            TraceEvent(
+                session_id="session_missing_tool_name",
+                sequence=0,
+                event_type=EventType.TOOL_MESSAGE,
+                payload={
+                    "message_id": "tool_0",
+                    "tool_call_id": "call_0",
+                    "content": "{}",
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "content must be a string"):
+            TraceEvent(
+                session_id="session_invalid_tool_content",
+                sequence=0,
+                event_type=EventType.TOOL_MESSAGE,
+                payload={
+                    "message_id": "tool_0",
+                    "name": "read_file",
+                    "tool_call_id": "call_0",
+                    "content": {"ok": True},
                 },
             )
 
@@ -141,7 +375,7 @@ class TraceContractTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(exit_code, 0)
             self.assertEqual(payload["terminal_state_hash"], "state_final")
-            self.assertEqual(payload["event_count"], 10)
+            self.assertEqual(payload["event_count"], 12)
 
 
 def _instance() -> ScenarioInstance:
@@ -156,6 +390,9 @@ def _instance() -> ScenarioInstance:
         environment=environment,
         hidden_evaluator=HiddenEvaluatorContext(
             reference_answer="EVALUATOR_CANARY_67890",
+            required_state={
+                "file_contains": {"src/parser.py": "REQUIRED_STATE_CANARY_24680"}
+            },
         ),
     )
     return ScenarioInstance.materialize(
@@ -176,7 +413,7 @@ def _record_complete_trace(
         session_id="session_fixture",
         scenario_instance=instance,
     ) as recorder:
-        recorder.start(instance)
+        recorder.start(instance, system_prompt=SYSTEM_PROMPT)
         recorder.record(
             EventType.USER_MESSAGE,
             {"message_id": "user_1", "content": instance.public_task.query},
@@ -186,7 +423,13 @@ def _record_complete_trace(
             {
                 "message_id": "assistant_1",
                 "content": None,
-                "tool_calls": [{"id": "call_1", "name": "run_command"}],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run_command", "arguments": "{}"},
+                    }
+                ],
             },
         )
         recorder.record(
@@ -220,6 +463,15 @@ def _record_complete_trace(
                 "before_state_hash": "state_initial",
                 "after_state_hash": "state_final",
                 "patch_artifact": patch_artifact,
+            },
+        )
+        recorder.record(
+            EventType.TOOL_MESSAGE,
+            {
+                "message_id": "tool_1",
+                "name": "run_command",
+                "tool_call_id": "call_1",
+                "content": json.dumps({"ok": True, "output": "1 test passed\n"}),
             },
         )
         recorder.record(

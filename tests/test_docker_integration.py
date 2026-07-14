@@ -24,6 +24,47 @@ GIT_IMAGE = "alpine/git@sha256:4a0e72d49596a1f5d3701aeedafdadc5c0da4062be4657c7b
     "Set EAD_RUN_DOCKER_TESTS=1 to run real Docker integration tests",
 )
 class DockerIntegrationTests(unittest.TestCase):
+    def test_candidate_patch_replays_tracked_and_new_files_on_clean_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "app.txt").write_text("value=1\n", encoding="utf-8")
+            first = DockerSandbox(
+                image_digest=GIT_IMAGE,
+                source_directory=source,
+                limits=SandboxLimits(memory="256m", cpus=0.5, pids=32),
+            )
+            second = DockerSandbox(
+                image_digest=GIT_IMAGE,
+                source_directory=source,
+                limits=SandboxLimits(memory="256m", cpus=0.5, pids=32),
+            )
+            first.create()
+            second.create()
+            try:
+                initial_hash = first.prepare_git_baseline()
+                first.write("app.txt", "value=2\n")
+                first.write("new.txt", "created\n")
+                self.assertEqual(first.execute(["chmod", "+x", "app.txt"]).exit_code, 0)
+                self.assertEqual(first.execute(["git", "add", "--all"]).exit_code, 0)
+                self.assertEqual(
+                    first.execute(["git", "commit", "-qm", "agent commit"]).exit_code,
+                    0,
+                )
+                candidate_hash = first.state_hash()
+                patch_text = first.candidate_patch()
+
+                self.assertEqual(second.prepare_git_baseline(), initial_hash)
+                replayed_hash = second.apply_candidate_patch(patch_text)
+
+                self.assertIn("new file mode", patch_text)
+                self.assertIn("new mode 100755", patch_text)
+                self.assertEqual(replayed_hash, candidate_hash)
+                self.assertEqual(second.read("app.txt"), "value=2\n")
+                self.assertEqual(second.read("new.txt"), "created\n")
+            finally:
+                first.destroy()
+                second.destroy()
+
     def test_isolated_container_executes_and_resets_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

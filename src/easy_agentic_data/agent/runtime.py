@@ -7,9 +7,25 @@ from dataclasses import dataclass
 
 from easy_agentic_data.coding_tools import CodingToolRuntime
 from easy_agentic_data.llm.base import LLMClient
+from easy_agentic_data.llm.observability import prompt_token_upper_bound
 from easy_agentic_data.models import Message
 from easy_agentic_data.scenarios import ScenarioInstance
 from easy_agentic_data.traces import EventType, TerminationReason, TraceRecorder
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a headless coding agent operating inside a restricted workspace.\n\n"
+    "Follow this protocol:\n"
+    "1. Inspect relevant files and repository state before editing.\n"
+    "2. Make the smallest change that fully satisfies the user request.\n"
+    "3. Use only available tools and paths inside the workspace. Never invent results.\n"
+    "4. After editing, run the narrowest relevant validation, then inspect the diff.\n"
+    "5. If validation passes and the diff matches the requested fix, stop and summarize.\n"
+    "6. If a tool fails, diagnose the error and retry with a corrected action.\n"
+    "7. Do not call unavailable tools or broad exploratory commands after a focused "
+    "test passes.\n"
+    "8. Ask the user only when required information cannot be discovered safely.\n"
+    "9. Finish with a concise summary of changes and validation actually performed."
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +45,7 @@ class AgentRunResult:
     tool_calls: int
     tokens: int
     final_state_hash: str
+    elapsed_ms: float
 
 
 class HeadlessAgent:
@@ -38,20 +55,7 @@ class HeadlessAgent:
         tools: CodingToolRuntime,
         *,
         budgets: AgentBudgets | None = None,
-        system_prompt: str = (
-            "You are a headless coding agent operating inside a restricted workspace.\n\n"
-            "Follow this protocol:\n"
-            "1. Inspect relevant files and repository state before editing.\n"
-            "2. Make the smallest change that fully satisfies the user request.\n"
-            "3. Use only available tools and paths inside the workspace. Never invent results.\n"
-            "4. After editing, run the narrowest relevant validation, then inspect the diff.\n"
-            "5. If validation passes and the diff matches the requested fix, stop and summarize.\n"
-            "6. If a tool fails, diagnose the error and retry with a corrected action.\n"
-            "7. Do not call unavailable tools or broad exploratory commands after a focused "
-            "test passes.\n"
-            "8. Ask the user only when required information cannot be discovered safely.\n"
-            "9. Finish with a concise summary of changes and validation actually performed."
-        ),
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     ) -> None:
         self.client = client
         self.tools = tools
@@ -71,29 +75,63 @@ class HeadlessAgent:
             Message("system", self.system_prompt),
             Message("user", instance.public_task.query),
         ]
-        recorder.start(instance)
+        recorder.start(instance, system_prompt=self.system_prompt)
         recorder.record(
             EventType.USER_MESSAGE,
             {"message_id": "user_0", "content": instance.public_task.query},
         )
         tool_calls = 0
+        tool_messages = 0
+        user_messages = 1
         tokens = 0
         malformed = 0
         final_answer = ""
         reason = TerminationReason.AGENT_STOP
+        tool_schemas = self.tools.schemas()
 
         for turn in range(self.budgets.max_turns):
             elapsed = time.monotonic() - started
             if elapsed >= self.budgets.max_seconds:
                 reason = TerminationReason.TIMEOUT
                 break
-            response = self.client.complete(messages, tools=self.tools.schemas())
-            tokens += int(response.usage.get("total_tokens", 0))
-            if tokens > self.budgets.max_tokens:
+            remaining_tokens = self.budgets.max_tokens - tokens
+            if remaining_tokens <= 0:
                 reason = TerminationReason.TOKEN_BUDGET
                 break
+            prompt_upper_bound = prompt_token_upper_bound(messages, tool_schemas)
+            remaining_output_tokens = remaining_tokens - prompt_upper_bound
+            if remaining_output_tokens <= 0:
+                reason = TerminationReason.TOKEN_BUDGET
+                break
+            client_max_tokens = getattr(
+                self.client,
+                "max_tokens",
+                remaining_output_tokens,
+            )
+            if (
+                isinstance(client_max_tokens, bool)
+                or not isinstance(client_max_tokens, int)
+                or client_max_tokens <= 0
+            ):
+                client_max_tokens = remaining_output_tokens
+            requested_output_tokens = min(
+                client_max_tokens,
+                remaining_output_tokens,
+            )
+            response = self.client.complete(
+                messages,
+                tools=tool_schemas,
+                max_tokens=requested_output_tokens,
+            )
+            response_tokens = _usage_total_tokens(response.usage)
+            _validate_response_token_bound(
+                response.usage,
+                prompt_upper_bound=prompt_upper_bound,
+                requested_output_tokens=requested_output_tokens,
+                remaining_tokens=remaining_tokens,
+            )
+            tokens += response_tokens
             assistant = response.message
-            messages.append(assistant)
             recorder.record(
                 EventType.MODEL_RESPONSE,
                 {
@@ -105,18 +143,47 @@ class HeadlessAgent:
                     "usage": response.usage,
                 },
             )
+            messages.append(assistant)
+            elapsed = time.monotonic() - started
+            if elapsed >= self.budgets.max_seconds:
+                tool_messages = _record_cancelled_tool_messages(
+                    recorder,
+                    messages,
+                    assistant.tool_calls,
+                    tool_message_index=tool_messages,
+                    error="Agent time budget exhausted",
+                )
+                reason = TerminationReason.TIMEOUT
+                break
+            if tokens > self.budgets.max_tokens:
+                tool_messages = _record_cancelled_tool_messages(
+                    recorder,
+                    messages,
+                    assistant.tool_calls,
+                    tool_message_index=tool_messages,
+                    error="Agent token budget exhausted",
+                )
+                reason = TerminationReason.TOKEN_BUDGET
+                break
             if not assistant.tool_calls:
                 final_answer = assistant.content or ""
                 reason = TerminationReason.AGENT_STOP
                 break
 
-            for raw_call in assistant.tool_calls:
+            for call_index, raw_call in enumerate(assistant.tool_calls):
                 if tool_calls >= self.budgets.max_tool_calls:
+                    tool_messages = _record_cancelled_tool_messages(
+                        recorder,
+                        messages,
+                        assistant.tool_calls[call_index:],
+                        tool_message_index=tool_messages,
+                        error="Agent tool budget exhausted",
+                    )
                     reason = TerminationReason.TOOL_BUDGET
                     break
-                call_id = raw_call.get("id", f"call_{tool_calls}")
-                function = raw_call.get("function", {})
-                name = str(function.get("name", ""))
+                call_id = raw_call["id"]
+                function = raw_call["function"]
+                name = function["name"]
                 try:
                     arguments = function.get("arguments", {})
                     if isinstance(arguments, str):
@@ -125,16 +192,27 @@ class HeadlessAgent:
                         raise ValueError("Tool arguments must be a JSON object")
                 except (json.JSONDecodeError, ValueError) as exc:
                     malformed += 1
-                    messages.append(
-                        Message(
-                            "tool",
-                            json.dumps({"ok": False, "error": f"Invalid tool arguments: {exc}"}),
-                            name=name,
-                            tool_call_id=call_id,
-                        )
+                    content = json.dumps(
+                        {"ok": False, "error": f"Invalid tool arguments: {exc}"}
                     )
+                    _record_tool_message(
+                        recorder,
+                        messages,
+                        message_id=f"tool_{tool_messages}",
+                        name=name,
+                        tool_call_id=call_id,
+                        content=content,
+                    )
+                    tool_messages += 1
                     if malformed > self.budgets.malformed_tool_retries:
-                        reason = TerminationReason.INFRASTRUCTURE_FAILURE
+                        tool_messages = _record_cancelled_tool_messages(
+                            recorder,
+                            messages,
+                            assistant.tool_calls[call_index + 1 :],
+                            tool_message_index=tool_messages,
+                            error="Malformed tool-call retry budget exhausted",
+                        )
+                        reason = TerminationReason.MALFORMED_TOOL_CALLS
                         break
                     continue
 
@@ -150,8 +228,21 @@ class HeadlessAgent:
                 )
                 if not decision.allowed:
                     result = {"ok": False, "error": decision.reason}
-                    messages.append(
-                        Message("tool", json.dumps(result), name=name, tool_call_id=call_id)
+                    _record_tool_message(
+                        recorder,
+                        messages,
+                        message_id=f"tool_{tool_messages}",
+                        name=name,
+                        tool_call_id=call_id,
+                        content=json.dumps(result),
+                    )
+                    tool_messages += 1
+                    tool_messages = _record_cancelled_tool_messages(
+                        recorder,
+                        messages,
+                        assistant.tool_calls[call_index + 1 :],
+                        tool_message_index=tool_messages,
+                        error="Session stopped after a policy violation",
                     )
                     reason = TerminationReason.POLICY_VIOLATION
                     break
@@ -183,34 +274,58 @@ class HeadlessAgent:
                     question = arguments["question"]
                     answer = ask_user(question) if ask_user else None
                     if answer is None:
-                        reason = TerminationReason.USER_STOP
-                        break
-                    recorder.record(
-                        EventType.USER_MESSAGE,
-                        {"message_id": f"user_{turn + 1}", "content": answer},
-                    )
-                    messages.append(
-                        Message(
-                            "tool", json.dumps({"answer": answer}), name=name, tool_call_id=call_id
-                        )
-                    )
-                    messages.append(Message("user", answer))
-                else:
-                    messages.append(
-                        Message(
-                            "tool",
-                            json.dumps(
-                                {
-                                    "ok": tool_result.error is None,
-                                    "output": tool_result.output,
-                                    "error": tool_result.error,
-                                },
-                                ensure_ascii=True,
-                            ),
+                        _record_tool_message(
+                            recorder,
+                            messages,
+                            message_id=f"tool_{tool_messages}",
                             name=name,
                             tool_call_id=call_id,
+                            content=json.dumps(
+                                {"ok": False, "error": "User stopped without an answer"}
+                            ),
+                        )
+                        tool_messages += 1
+                        tool_messages = _record_cancelled_tool_messages(
+                            recorder,
+                            messages,
+                            assistant.tool_calls[call_index + 1 :],
+                            tool_message_index=tool_messages,
+                            error="Session stopped by the user",
+                        )
+                        reason = TerminationReason.USER_STOP
+                        break
+                    _record_tool_message(
+                        recorder,
+                        messages,
+                        message_id=f"tool_{tool_messages}",
+                        name=name,
+                        tool_call_id=call_id,
+                        content=json.dumps({"answer": answer}),
+                    )
+                    tool_messages += 1
+                    recorder.record(
+                        EventType.USER_MESSAGE,
+                        {"message_id": f"user_{user_messages}", "content": answer},
+                    )
+                    user_messages += 1
+                    messages.append(Message("user", answer))
+                else:
+                    _record_tool_message(
+                        recorder,
+                        messages,
+                        message_id=f"tool_{tool_messages}",
+                        name=name,
+                        tool_call_id=call_id,
+                        content=json.dumps(
+                            {
+                                "ok": tool_result.error is None,
+                                "output": tool_result.output,
+                                "error": tool_result.error,
+                            },
+                            ensure_ascii=True,
                         )
                     )
+                    tool_messages += 1
             else:
                 continue
             break
@@ -218,6 +333,7 @@ class HeadlessAgent:
             turn = self.budgets.max_turns
             reason = TerminationReason.TIMEOUT
 
+        elapsed_ms = (time.monotonic() - started) * 1000
         final_hash = self.tools.sandbox.state_hash()
         if finalize:
             recorder.record(
@@ -235,4 +351,103 @@ class HeadlessAgent:
             tool_calls,
             tokens,
             final_hash,
+            elapsed_ms,
         )
+
+
+def _usage_total_tokens(usage: dict[str, int]) -> int:
+    value = usage.get("total_tokens")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(value, 0)
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+    completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
+    return sum(
+        max(item, 0)
+        for item in (prompt, completion)
+        if isinstance(item, int) and not isinstance(item, bool)
+    )
+
+
+def _validate_response_token_bound(
+    usage: dict[str, int],
+    *,
+    prompt_upper_bound: int,
+    requested_output_tokens: int,
+    remaining_tokens: int,
+) -> None:
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion = usage.get("completion_tokens", usage.get("output_tokens"))
+    total = usage.get("total_tokens")
+    if total is not None and (
+        isinstance(total, bool) or not isinstance(total, int) or total < 0
+    ):
+        raise ValueError("Provider total token usage must be a non-negative integer")
+    if prompt is not None and (
+        isinstance(prompt, bool) or not isinstance(prompt, int) or prompt < 0
+    ):
+        raise ValueError("Provider input token usage must be a non-negative integer")
+    if completion is not None and (
+        isinstance(completion, bool)
+        or not isinstance(completion, int)
+        or completion < 0
+    ):
+        raise ValueError("Provider output token usage must be a non-negative integer")
+    if isinstance(prompt, int) and prompt > prompt_upper_bound:
+        raise ValueError("Provider input usage exceeded its pre-request token bound")
+    if isinstance(completion, int) and completion > requested_output_tokens:
+        raise ValueError("Provider output usage exceeded the requested token bound")
+    if (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and isinstance(prompt, int)
+        and not isinstance(prompt, bool)
+        and isinstance(completion, int)
+        and not isinstance(completion, bool)
+        and total != prompt + completion
+    ):
+        raise ValueError("Provider total token usage is inconsistent with input and output")
+    if _usage_total_tokens(usage) > remaining_tokens:
+        raise ValueError("Provider usage exceeded the remaining agent token budget")
+
+
+def _record_tool_message(
+    recorder: TraceRecorder,
+    messages: list[Message],
+    *,
+    message_id: str,
+    name: str,
+    tool_call_id: str,
+    content: str,
+) -> None:
+    recorder.record(
+        EventType.TOOL_MESSAGE,
+        {
+            "message_id": message_id,
+            "name": name,
+            "tool_call_id": tool_call_id,
+            "content": content,
+        },
+    )
+    messages.append(Message("tool", content, name=name, tool_call_id=tool_call_id))
+
+
+def _record_cancelled_tool_messages(
+    recorder: TraceRecorder,
+    messages: list[Message],
+    tool_calls: list[dict],
+    *,
+    tool_message_index: int,
+    error: str,
+) -> int:
+    for call in tool_calls:
+        function = call["function"]
+        _record_tool_message(
+            recorder,
+            messages,
+            message_id=f"tool_{tool_message_index}",
+            name=function["name"],
+            tool_call_id=call["id"],
+            content=json.dumps({"ok": False, "error": error}),
+        )
+        tool_message_index += 1
+    return tool_message_index

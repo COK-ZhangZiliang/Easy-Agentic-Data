@@ -149,6 +149,18 @@ class SandboxToolTests(unittest.TestCase):
         self.assertTrue(read.output["truncated"])
         self.assertEqual(sliced.output["content"], "two\nthree\n")
 
+    def test_git_diff_tool_returns_bounded_structured_output(self) -> None:
+        sandbox = MemorySandbox({"app.py": "before\n"})
+        sandbox.create()
+        sandbox.write("app.py", "x" * 50_000)
+        runtime = CodingToolRuntime(sandbox, ToolPolicy(["git_diff"]))
+
+        result = runtime.execute("git_diff", {})
+
+        self.assertEqual(len(result.output["diff"]), 40_000)
+        self.assertGreater(result.output["chars"], 40_000)
+        self.assertTrue(result.output["truncated"])
+
     def test_read_file_rejects_invalid_slice_bounds(self) -> None:
         offset = self.runtime.execute("read_file", {"path": "app.py", "offset": 0})
         limit = self.runtime.execute("read_file", {"path": "app.py", "limit": 0})
@@ -216,6 +228,54 @@ class SandboxToolTests(unittest.TestCase):
                 "container",
             ],
         )
+
+    def test_docker_candidate_patch_includes_new_files_and_binary_changes(self) -> None:
+        sandbox = DockerSandbox(image_digest="sha256:" + "b" * 64, source_directory=".")
+        calls = []
+
+        def execute(command, **kwargs):
+            del kwargs
+            calls.append(command)
+            if command[:2] == ["git", "diff"]:
+                return CommandResult(0, "binary candidate patch", "", 1.0)
+            return CommandResult(0, "", "", 1.0)
+
+        with patch.object(sandbox, "execute", side_effect=execute):
+            value = sandbox.candidate_patch()
+
+        self.assertEqual(value, "binary candidate patch")
+        self.assertEqual(
+            calls[0],
+            ["git", "add", "--intent-to-add", "--all", "--force"],
+        )
+        self.assertEqual(
+            calls[1],
+            ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
+        )
+
+    def test_docker_prepare_git_baseline_commits_post_setup_workspace(self) -> None:
+        sandbox = DockerSandbox(image_digest="sha256:" + "b" * 64, source_directory=".")
+        commands = []
+
+        def execute(command, **kwargs):
+            del kwargs
+            commands.append(command)
+            stdout = "a" * 40 + "\n" if command == ["git", "rev-parse", "HEAD"] else ""
+            return CommandResult(0, stdout, "", 1.0)
+
+        with (
+            patch.object(sandbox, "execute", side_effect=execute),
+            patch.object(sandbox, "state_hash", return_value="baseline_hash"),
+        ):
+            baseline = sandbox.prepare_git_baseline()
+
+        self.assertEqual(baseline, "baseline_hash")
+        self.assertEqual(commands[0], ["git", "init", "-q"])
+        self.assertIn(
+            ["git", "commit", "--allow-empty", "-qm", "ead-baseline"],
+            commands,
+        )
+        self.assertEqual(commands[-1], ["git", "rev-parse", "HEAD"])
 
 
 class _UnreadableFileSandbox(MemorySandbox):

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 import time
 import urllib.request
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
@@ -40,6 +41,18 @@ class RolloutJob:
 
 
 @dataclass(frozen=True)
+class ConsumedUsageTotals:
+    """Absolute, cumulative resources accounted to one rollout job."""
+
+    tokens: int
+    cost: float
+    elapsed_ms: float
+
+    def __post_init__(self) -> None:
+        _validate_consumed_usage_totals(self)
+
+
+@dataclass(frozen=True)
 class RolloutOutcome:
     trace_id: str = ""
     success: bool = False
@@ -48,6 +61,7 @@ class RolloutOutcome:
     cost: float = 0.0
     metrics: dict[str, float] = field(default_factory=dict)
     error: str = ""
+    absolute_consumed_usage: ConsumedUsageTotals | None = None
 
 
 class RolloutWorker(Protocol):
@@ -59,6 +73,21 @@ class RunBudget:
     max_seconds: float = 3600.0
     max_tokens: int = 1_000_000
     max_cost: float = 100.0
+    max_job_seconds: float = 0.0
+    max_job_tokens: int = 0
+    max_job_cost: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in ("max_seconds", "max_cost", "max_job_seconds", "max_job_cost"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a number")
+            if not math.isfinite(float(value)) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        for name in ("max_tokens", "max_job_tokens"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
 
 
 class PersistentScheduler:
@@ -105,8 +134,15 @@ class PersistentScheduler:
         job_ids: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         budget = budget or RunBudget()
+        if max_workers <= 0:
+            raise ValueError("max_workers must be positive")
         started = time.monotonic()
-        totals = {"tokens": 0, "cost": 0.0, "processed": 0}
+        totals = {
+            "tokens": 0,
+            "cost": 0.0,
+            "elapsed_seconds": 0.0,
+            "processed": 0,
+        }
         self.recover_interrupted()
         pending = self._pending_jobs()
         if job_ids is not None:
@@ -126,23 +162,51 @@ class PersistentScheduler:
                 )
             return job, outcome
 
+        cursor = 0
+        budget_exhausted = False
+        reservation_stop_reasons: list[str] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(execute, job): job for job in pending}
-            for future in as_completed(futures):
-                job, outcome = future.result()
-                totals["processed"] += 1
-                totals["tokens"] += outcome.tokens
-                totals["cost"] += outcome.cost
-                self._finish(job, outcome, max_retries)
-                if (
-                    time.monotonic() - started >= budget.max_seconds
-                    or totals["tokens"] >= budget.max_tokens
-                    or totals["cost"] >= budget.max_cost
-                ):
-                    for pending_future in futures:
-                        pending_future.cancel()
+            while cursor < len(pending):
+                stop_reasons = _budget_stop_reasons(totals, budget, started)
+                if stop_reasons:
+                    budget_exhausted = True
                     break
-        return {**totals, "status_counts": self.status_counts()}
+                batch: list[RolloutJob] = []
+                reserved = {"tokens": 0, "cost": 0.0, "seconds": 0.0}
+                while cursor < len(pending) and len(batch) < max_workers:
+                    reservation_stop_reasons = _job_reservation_stop_reasons(
+                        totals,
+                        reserved,
+                        budget,
+                        started,
+                    )
+                    if reservation_stop_reasons:
+                        budget_exhausted = True
+                        break
+                    batch.append(pending[cursor])
+                    cursor += 1
+                    reserved["tokens"] += budget.max_job_tokens
+                    reserved["cost"] += budget.max_job_cost
+                    reserved["seconds"] += budget.max_job_seconds
+                if not batch:
+                    break
+                futures = [executor.submit(execute, job) for job in batch]
+                for future in as_completed(futures):
+                    job, outcome = future.result()
+                    totals["processed"] += 1
+                    totals["tokens"] += outcome.tokens
+                    totals["cost"] += outcome.cost
+                    totals["elapsed_seconds"] += _outcome_elapsed_seconds(outcome)
+                    self._finish(job, outcome, max_retries)
+        return {
+            **totals,
+            "budget_exhausted": budget_exhausted,
+            "budget_stop_reasons": sorted(
+                set(_budget_stop_reasons(totals, budget, started))
+                | set(reservation_stop_reasons)
+            ),
+            "status_counts": self.status_counts(),
+        }
 
     def status_counts(self) -> dict[str, int]:
         with self._connect() as connection:
@@ -163,6 +227,63 @@ class PersistentScheduler:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM jobs ORDER BY job_id").fetchall()
         return [dict(row) for row in rows]
+
+    def reconcile_consumed_usage(
+        self,
+        totals_by_job_id: Mapping[str, ConsumedUsageTotals],
+    ) -> None:
+        """Atomically replace accounted usage with monotonic absolute ledger totals."""
+
+        totals = dict(totals_by_job_id)
+        for job_id, usage in totals.items():
+            if not isinstance(job_id, str) or not job_id:
+                raise ValueError("Consumed usage job IDs must be non-empty strings")
+            _validate_consumed_usage_totals(usage, context=f"job {job_id!r}")
+        if not totals:
+            return
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT job_id, consumed_tokens, consumed_cost, consumed_elapsed_ms
+                FROM jobs
+                """
+            ).fetchall()
+            current_by_job_id = {str(row["job_id"]): row for row in rows}
+            unknown_job_ids = sorted(set(totals) - current_by_job_id.keys())
+            if unknown_job_ids:
+                raise ValueError(f"Unknown rollout job IDs: {unknown_job_ids}")
+
+            for job_id, usage in sorted(totals.items()):
+                _require_monotonic_consumed_usage(
+                    current_by_job_id[job_id],
+                    usage,
+                    context=f"job {job_id!r}",
+                )
+            connection.executemany(
+                """
+                UPDATE jobs SET consumed_tokens = ?, consumed_cost = ?,
+                consumed_elapsed_ms = ? WHERE job_id = ?
+                """,
+                [
+                    (usage.tokens, usage.cost, usage.elapsed_ms, job_id)
+                    for job_id, usage in sorted(totals.items())
+                ],
+            )
+
+    def reconcile_interrupted_outcome(
+        self,
+        job: RolloutJob,
+        outcome: RolloutOutcome,
+        *,
+        max_retries: int,
+    ) -> None:
+        """Apply a durable worker outcome to a still-running row without a new attempt."""
+
+        if outcome.absolute_consumed_usage is None:
+            raise ValueError("Interrupted outcome reconciliation requires absolute usage")
+        self._finish(job, outcome, max_retries, require_running=True)
 
     def _pending_jobs(self) -> list[RolloutJob]:
         with self._connect() as connection:
@@ -188,11 +309,27 @@ class PersistentScheduler:
                 (JobStatus.RUNNING.value, job_id),
             )
 
-    def _finish(self, job: RolloutJob, outcome: RolloutOutcome, max_retries: int) -> None:
+    def _finish(
+        self,
+        job: RolloutJob,
+        outcome: RolloutOutcome,
+        max_retries: int,
+        *,
+        require_running: bool = False,
+    ) -> None:
         with self._lock, self._connect() as connection:
-            attempts = connection.execute(
-                "SELECT attempts FROM jobs WHERE job_id = ?", (job.job_id,)
-            ).fetchone()["attempts"]
+            row = connection.execute(
+                """
+                SELECT status, attempts, consumed_tokens, consumed_cost, consumed_elapsed_ms
+                FROM jobs WHERE job_id = ?
+                """,
+                (job.job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown rollout job ID: {job.job_id}")
+            if require_running and row["status"] != JobStatus.RUNNING.value:
+                raise ValueError("Interrupted outcome can only reconcile a running job")
+            attempts = row["attempts"]
             if outcome.infrastructure_failure and attempts <= max_retries:
                 status = JobStatus.PENDING
             elif outcome.infrastructure_failure:
@@ -201,10 +338,28 @@ class PersistentScheduler:
                 status = JobStatus.COMPLETED
             else:
                 status = JobStatus.FAILED
+            if outcome.absolute_consumed_usage is None:
+                consumed_tokens = int(row["consumed_tokens"] or 0) + outcome.tokens
+                consumed_cost = float(row["consumed_cost"] or 0.0) + outcome.cost
+                consumed_elapsed_ms = float(row["consumed_elapsed_ms"] or 0.0) + (
+                    _outcome_elapsed_seconds(outcome) * 1000
+                )
+            else:
+                usage = outcome.absolute_consumed_usage
+                _validate_consumed_usage_totals(usage, context=f"job {job.job_id!r}")
+                _require_monotonic_consumed_usage(
+                    row,
+                    usage,
+                    context=f"job {job.job_id!r}",
+                )
+                consumed_tokens = usage.tokens
+                consumed_cost = usage.cost
+                consumed_elapsed_ms = usage.elapsed_ms
             connection.execute(
                 """
                 UPDATE jobs SET status = ?, trace_id = ?, success = ?, tokens = ?,
-                cost = ?, metrics = ?, error = ? WHERE job_id = ?
+                cost = ?, metrics = ?, error = ?, consumed_tokens = ?,
+                consumed_cost = ?, consumed_elapsed_ms = ? WHERE job_id = ?
                 """,
                 (
                     status.value,
@@ -214,6 +369,9 @@ class PersistentScheduler:
                     outcome.cost,
                     json.dumps(outcome.metrics, sort_keys=True),
                     outcome.error,
+                    consumed_tokens,
+                    consumed_cost,
+                    consumed_elapsed_ms,
                     job.job_id,
                 ),
             )
@@ -227,15 +385,148 @@ class PersistentScheduler:
                     model TEXT, config_hash TEXT, status TEXT, attempts INTEGER,
                     trace_id TEXT DEFAULT '', success INTEGER DEFAULT 0,
                     tokens INTEGER DEFAULT 0, cost REAL DEFAULT 0,
-                    metrics TEXT DEFAULT '{}', error TEXT DEFAULT ''
+                    metrics TEXT DEFAULT '{}', error TEXT DEFAULT '',
+                    consumed_tokens INTEGER DEFAULT 0,
+                    consumed_cost REAL DEFAULT 0,
+                    consumed_elapsed_ms REAL DEFAULT 0
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            additions = {
+                "consumed_tokens": "INTEGER DEFAULT 0",
+                "consumed_cost": "REAL DEFAULT 0",
+                "consumed_elapsed_ms": "REAL DEFAULT 0",
+            }
+            added = []
+            for name, declaration in additions.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+                    added.append(name)
+            if added:
+                for row in connection.execute(
+                    "SELECT job_id, tokens, cost, metrics FROM jobs"
+                ).fetchall():
+                    try:
+                        metrics = json.loads(row["metrics"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        metrics = {}
+                    elapsed_ms = (
+                        float(metrics.get("elapsed_ms", 0.0) or 0.0)
+                        if isinstance(metrics, dict)
+                        else 0.0
+                    )
+                    connection.execute(
+                        """
+                        UPDATE jobs SET consumed_tokens = ?, consumed_cost = ?,
+                        consumed_elapsed_ms = ? WHERE job_id = ?
+                        """,
+                        (row["tokens"] or 0, row["cost"] or 0.0, elapsed_ms, row["job_id"]),
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database, timeout=30)
         connection.row_factory = sqlite3.Row
         return connection
+
+
+def _outcome_elapsed_seconds(outcome: RolloutOutcome) -> float:
+    value = outcome.metrics.get("elapsed_ms", 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    amount = float(value) / 1000
+    return amount if math.isfinite(amount) and amount >= 0 else 0.0
+
+
+def _validate_consumed_usage_totals(
+    usage: ConsumedUsageTotals,
+    *,
+    context: str = "consumed usage",
+) -> None:
+    if not isinstance(usage, ConsumedUsageTotals):
+        raise ValueError(f"{context} must be ConsumedUsageTotals")
+    if isinstance(usage.tokens, bool) or not isinstance(usage.tokens, int):
+        raise ValueError(f"{context} tokens must be a non-negative integer")
+    if usage.tokens < 0:
+        raise ValueError(f"{context} tokens must be a non-negative integer")
+    for name in ("cost", "elapsed_ms"):
+        value = getattr(usage, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{context} {name} must be finite and non-negative")
+        if not math.isfinite(float(value)) or value < 0:
+            raise ValueError(f"{context} {name} must be finite and non-negative")
+
+
+def _require_monotonic_consumed_usage(
+    current: sqlite3.Row,
+    proposed: ConsumedUsageTotals,
+    *,
+    context: str,
+) -> None:
+    current_values = {
+        "tokens": int(current["consumed_tokens"] or 0),
+        "cost": float(current["consumed_cost"] or 0.0),
+        "elapsed_ms": float(current["consumed_elapsed_ms"] or 0.0),
+    }
+    proposed_values = {
+        "tokens": proposed.tokens,
+        "cost": proposed.cost,
+        "elapsed_ms": proposed.elapsed_ms,
+    }
+    decreased = [
+        name
+        for name, current_value in current_values.items()
+        if proposed_values[name] < current_value
+    ]
+    if decreased:
+        raise ValueError(
+            f"{context} absolute consumed usage cannot decrease fields: {decreased}"
+        )
+
+
+def _budget_stop_reasons(
+    totals: dict[str, int | float],
+    budget: RunBudget,
+    started: float,
+) -> list[str]:
+    reasons = []
+    if totals["tokens"] >= budget.max_tokens:
+        reasons.append("tokens")
+    if totals["cost"] >= budget.max_cost:
+        reasons.append("cost")
+    if totals["elapsed_seconds"] >= budget.max_seconds:
+        reasons.append("aggregate_seconds")
+    if time.monotonic() - started >= budget.max_seconds:
+        reasons.append("wall_seconds")
+    return reasons
+
+
+def _job_reservation_stop_reasons(
+    totals: dict[str, int | float],
+    reserved: dict[str, int | float],
+    budget: RunBudget,
+    started: float,
+) -> list[str]:
+    reasons = []
+    if budget.max_job_tokens and (
+        totals["tokens"] + reserved["tokens"] + budget.max_job_tokens
+        > budget.max_tokens
+    ):
+        reasons.append("job_token_reservation")
+    if budget.max_job_cost and (
+        totals["cost"] + reserved["cost"] + budget.max_job_cost > budget.max_cost
+    ):
+        reasons.append("job_cost_reservation")
+    if budget.max_job_seconds:
+        reserved_seconds = reserved["seconds"] + budget.max_job_seconds
+        if totals["elapsed_seconds"] + reserved_seconds > budget.max_seconds:
+            reasons.append("job_aggregate_seconds_reservation")
+        if time.monotonic() - started + reserved_seconds > budget.max_seconds:
+            reasons.append("job_wall_seconds_reservation")
+    return reasons
 
 
 class RateLimiter:

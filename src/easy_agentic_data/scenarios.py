@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from easy_agentic_data.environments import EnvironmentSpec
 from easy_agentic_data.models import stable_id
 from easy_agentic_data.seeds import HiddenUserContext, PublicTaskContext, QuerySeed
+
+
+def json_payload_contains_string(payload: Any, value: str) -> bool:
+    """Match a decoded string against its canonical JSON-escaped payload representation."""
+
+    if not value:
+        return False
+    encoded_value = json.dumps(value, ensure_ascii=True)[1:-1]
+    encoded_payload = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    return bool(encoded_value and encoded_value in encoded_payload)
 
 
 @dataclass
@@ -127,17 +138,50 @@ class ScenarioInstance:
         }
 
     def sensitive_strings(self) -> list[str]:
+        """Return every distinct private string for post-run contamination auditing."""
+
         hidden_values: list[str] = []
-        public_values: list[str] = []
+        _collect_strings(self.hidden_user.goal, hidden_values)
+        _collect_strings(self.hidden_user.unavailable_facts, hidden_values)
+        _collect_strings(self.hidden_evaluator.reference_answer, hidden_values)
+        _collect_strings(self.hidden_evaluator.reference_artifacts, hidden_values)
+        _collect_strings(self.hidden_evaluator.hidden_tests, hidden_values)
+        _collect_strings(self.hidden_evaluator.required_state, hidden_values)
+        _collect_strings(self.hidden_evaluator.forbidden_state, hidden_values)
+        _collect_strings(self.hidden_evaluator.metadata, hidden_values)
+        return _distinct_private_strings(self, hidden_values)
+
+    def trace_forbidden_strings(self) -> list[str]:
+        """Return high-confidence private strings safe for literal live-trace rejection.
+
+        Required-state fragments can legitimately be rediscovered as candidate code. They remain
+        part of the complete post-run contamination audit, while the live recorder rejects only
+        explicit private markers from those free-form fields to avoid blocking correct repairs.
+        """
+
+        hidden_values: list[str] = []
         _collect_strings(self.hidden_user.goal, hidden_values)
         _collect_strings(self.hidden_user.unavailable_facts, hidden_values)
         _collect_strings(self.hidden_evaluator.reference_answer, hidden_values)
         _collect_strings(self.hidden_evaluator.reference_artifacts, hidden_values)
         _collect_strings(self.hidden_evaluator.hidden_tests, hidden_values)
         _collect_strings(self.hidden_evaluator.metadata.get("test_patch"), hidden_values)
-        _collect_strings(self.public_task.to_dict(), public_values)
-        public = set(public_values)
-        return sorted({value for value in hidden_values if len(value) >= 8 and value not in public})
+        nested_values: list[str] = []
+        _collect_strings(self.hidden_evaluator.required_state, nested_values)
+        _collect_strings(self.hidden_evaluator.forbidden_state, nested_values)
+        _collect_strings(self.hidden_evaluator.metadata, nested_values)
+        hidden_values.extend(value for value in nested_values if _is_private_marker(value))
+        return _distinct_private_strings(self, hidden_values)
+
+    def _observable_strings(self) -> list[str]:
+        observable_values: list[str] = []
+        _collect_strings(self.public_task.to_dict(), observable_values)
+        _collect_strings(self.hidden_user.known_facts, observable_values)
+        _collect_strings(
+            self.hidden_user.interaction_policy.get("corrections", {}),
+            observable_values,
+        )
+        return observable_values
 
     def to_dict(self, *, include_hidden: bool = True) -> dict[str, Any]:
         value = self.public_view()
@@ -164,6 +208,33 @@ def _collect_strings(value: Any, output: list[str]) -> None:
     elif isinstance(value, dict):
         for item in value.values():
             _collect_strings(item, output)
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, (list, tuple, set, frozenset)):
         for item in value:
             _collect_strings(item, output)
+
+
+def _distinct_private_strings(instance: ScenarioInstance, values: list[str]) -> list[str]:
+    observable_values = instance._observable_strings()
+    return sorted(
+        {
+            value
+            for value in values
+            if len(value) >= 8
+            and not any(value in observable for observable in observable_values)
+        }
+    )
+
+
+def _is_private_marker(value: str) -> bool:
+    lowered = value.lower()
+    markers = (
+        "canary",
+        "credential",
+        "password",
+        "private key",
+        "secret",
+        "api_key",
+        "api-key",
+        "authorization",
+    )
+    return len(value) >= 128 or any(marker in lowered for marker in markers)

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from easy_agentic_data.models import stable_id
-from easy_agentic_data.scenarios import ScenarioInstance
+from easy_agentic_data.scenarios import ScenarioInstance, json_payload_contains_string
 from easy_agentic_data.traces.events import EventType, TraceEvent
 
 
@@ -42,7 +42,9 @@ class TraceRecorder:
         self._closed = False
         self._finished = False
         self._forbidden_values = (
-            scenario_instance.sensitive_strings() if scenario_instance is not None else []
+            scenario_instance.trace_forbidden_strings()
+            if scenario_instance is not None
+            else []
         )
 
     def __enter__(self) -> TraceRecorder:
@@ -75,13 +77,20 @@ class TraceRecorder:
             self._finished = True
         return event
 
-    def start(self, scenario_instance: ScenarioInstance) -> TraceEvent:
+    def start(
+        self,
+        scenario_instance: ScenarioInstance,
+        *,
+        system_prompt: str,
+    ) -> TraceEvent:
         if self._sequence != 0:
             raise RuntimeError("session_started must be the first trace event")
+        if not isinstance(system_prompt, str) or not system_prompt:
+            raise ValueError("system_prompt must be a non-empty string")
         self._forbidden_values = sorted(
-            set(self._forbidden_values) | set(scenario_instance.sensitive_strings())
+            set(self._forbidden_values) | set(scenario_instance.trace_forbidden_strings())
         )
-        return self.record(
+        started = self.record(
             EventType.SESSION_STARTED,
             {
                 "scenario_instance_id": scenario_instance.instance_id,
@@ -93,6 +102,11 @@ class TraceRecorder:
                 "parameters": scenario_instance.parameters,
             },
         )
+        self.record(
+            EventType.SYSTEM_MESSAGE,
+            {"message_id": "system_0", "content": system_prompt},
+        )
+        return started
 
     def close(self) -> None:
         if not self._closed:
@@ -102,10 +116,8 @@ class TraceRecorder:
             self._closed = True
 
     def _check_hidden_context(self, payload: dict[str, Any]) -> None:
-        encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True)
         for value in self._forbidden_values:
-            escaped = json.dumps(value, ensure_ascii=True)[1:-1]
-            if escaped and escaped in encoded:
+            if json_payload_contains_string(payload, value):
                 raise ValueError("Trace event contains content from a hidden context")
 
 
@@ -153,6 +165,13 @@ def _validate_event_order(events: Iterable[TraceEvent]) -> None:
         return
     if items[0].event_type is not EventType.SESSION_STARTED:
         raise ValueError("The first trace event must be session_started")
+    system_indexes = [
+        index for index, event in enumerate(items) if event.event_type is EventType.SYSTEM_MESSAGE
+    ]
+    if len(system_indexes) > 1:
+        raise ValueError("A trace can contain only one system_message event")
+    if len(items) > 1 and system_indexes != [1]:
+        raise ValueError("system_message must immediately follow session_started")
     finished_indexes = [
         index for index, event in enumerate(items) if event.event_type is EventType.SESSION_FINISHED
     ]
@@ -160,3 +179,35 @@ def _validate_event_order(events: Iterable[TraceEvent]) -> None:
         raise ValueError("A trace can contain only one session_finished event")
     if finished_indexes and finished_indexes[0] != len(items) - 1:
         raise ValueError("session_finished must be the final trace event")
+
+    seen_call_ids: set[str] = set()
+    pending_calls: dict[str, str] = {}
+    for event in items:
+        if event.event_type is EventType.MODEL_RESPONSE:
+            if pending_calls:
+                raise ValueError(
+                    "model_response cannot occur before all assistant tool calls have results"
+                )
+            for call in event.payload.get("tool_calls", []):
+                call_id = call["id"]
+                if call_id in seen_call_ids:
+                    raise ValueError(f"Duplicate assistant tool call id: {call_id}")
+                seen_call_ids.add(call_id)
+                pending_calls[call_id] = call["function"]["name"]
+        elif event.event_type is EventType.TOOL_MESSAGE:
+            call_id = event.payload["tool_call_id"]
+            if call_id not in pending_calls:
+                if call_id in seen_call_ids:
+                    raise ValueError(f"Duplicate tool_message for assistant call: {call_id}")
+                raise ValueError(f"Orphan tool_message for unknown assistant call: {call_id}")
+            expected_name = pending_calls[call_id]
+            if event.payload["name"] != expected_name:
+                raise ValueError(
+                    f"tool_message name does not match assistant call {call_id}: "
+                    f"expected {expected_name}"
+                )
+            del pending_calls[call_id]
+        elif event.event_type is EventType.SESSION_FINISHED and pending_calls:
+            raise ValueError(
+                "session_finished cannot occur before all assistant tool calls have results"
+            )
