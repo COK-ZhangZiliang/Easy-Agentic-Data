@@ -24,6 +24,7 @@ from easy_agentic_data.evaluation import (
 from easy_agentic_data.llm import trace_prompt_fingerprints
 from easy_agentic_data.models import LLMResponse, Message, stable_id
 from easy_agentic_data.pilot_artifacts import (
+    _row_metrics,
     _scenario_tool_schema_sha256,
     _scenario_tool_schemas,
     build_pilot_quality_report,
@@ -68,6 +69,23 @@ from easy_agentic_data.trajectory_review import (
 
 
 class PilotArtifactTests(unittest.TestCase):
+    def test_scheduler_metrics_allow_signed_turn_reward_summaries(self) -> None:
+        metrics = _row_metrics(
+            {
+                "metrics": {
+                    "turn_reward_total": -0.4,
+                    "turn_reward_mean": -0.1,
+                    "negative_turn_rewards": 4.0,
+                    "tokens": 100.0,
+                }
+            }
+        )
+
+        self.assertEqual(metrics["turn_reward_total"], -0.4)
+        self.assertEqual(metrics["turn_reward_mean"], -0.1)
+        with self.assertRaisesRegex(ValueError, "tokens must be finite and non-negative"):
+            _row_metrics({"metrics": {"tokens": -1.0}})
+
     def test_pilot_cli_enqueues_and_dry_runs_exact_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

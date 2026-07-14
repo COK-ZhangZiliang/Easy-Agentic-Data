@@ -1764,7 +1764,10 @@ def _row_metrics(row: Mapping[str, Any]) -> dict[str, float]:
     for raw_key, raw_amount in value.items():
         if not isinstance(raw_key, str):
             raise ValueError("Scheduler metric names must be strings")
-        result[raw_key] = _finite_nonnegative_number(raw_amount, raw_key)
+        if raw_key in {"turn_reward_total", "turn_reward_mean"}:
+            result[raw_key] = _finite_number(raw_amount, raw_key)
+        else:
+            result[raw_key] = _finite_nonnegative_number(raw_amount, raw_key)
     return result
 
 
@@ -1788,11 +1791,18 @@ def _nonnegative_integer(
 
 
 def _finite_nonnegative_number(value: Any, field_name: str) -> float:
+    result = _finite_number(value, field_name)
+    if result < 0:
+        raise ValueError(f"{field_name} must be finite and non-negative")
+    return result
+
+
+def _finite_number(value: Any, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field_name} must be a number")
     result = float(value)
-    if not math.isfinite(result) or result < 0:
-        raise ValueError(f"{field_name} must be finite and non-negative")
+    if not math.isfinite(result):
+        raise ValueError(f"{field_name} must be finite")
     return result
 
 
